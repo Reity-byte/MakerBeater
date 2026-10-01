@@ -6,7 +6,10 @@ přes Web Audio API.
 
 ## Spuštění
 
-**Jako aplikace (doporučeno):**
+**Online:** <https://reity-byte.github.io/MakerBeater/>. V Chrome nebo Edge jde pak nainstalovat jako aplikace
+(ikona *Instalovat* v adresním řádku nebo *Projekt → Nainstalovat jako aplikaci*). Funguje i offline a sama se aktualizuje.
+
+**Jako aplikace z disku (Windows):**
 
 1. Dvojklikni na `Nainstalovat aplikaci.cmd`. Vytvoří zástupce **MakerBeater** na ploše, v nabídce Start
    (jde vyhledat) i ve složce projektu.
