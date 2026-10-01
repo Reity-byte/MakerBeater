@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="cs">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MakerBeater – testy</title>
+  <style>
+    body { background: #0d0f14; color: #e6e9ef; font: 14px/1.5 'Segoe UI', system-ui, sans-serif; margin: 0; padding: 24px; }
+    h1 { font-size: 20px; margin: 0 0 4px; }
+    p { color: #8b93a7; margin: 0 0 16px; }
+    button { background: #7c5cff; color: #fff; border: 0; border-radius: 8px; padding: 9px 16px; font: inherit; cursor: pointer; }
+    button:disabled { opacity: 0.5; cursor: default; }
+    label { margin-left: 12px; color: #8b93a7; }
+    ul { list-style: none; padding: 0; margin: 20px 0 0; max-width: 900px; }
+    li { background: #141821; border: 1px solid #262c3a; border-radius: 8px; padding: 10px 14px; margin-bottom: 8px; }
+    li .name { font-weight: 600; }
+    li .detail { color: #8b93a7; font-family: Consolas, monospace; font-size: 12px; white-space: pre-wrap; margin-top: 4px; }
+    li.pass .name::before { content: '✔ '; color: #38d9a9; }
+    li.fail .name::before { content: '✘ '; color: #ff5d73; }
+    li.run .name::before { content: '… '; color: #ffd43b; }
+    #summary { margin-top: 16px; font-weight: 600; }
+  </style>
+</head>
+<body>
+  <h1>MakerBeater – automatické testy</h1>
+  <p>Testy běží přímo v prohlížeči nad stejným kódem jako aplikace. Živý audio test je potichu, pokud nezaškrtneš „nahlas“.</p>
+  <button id="run">Spustit všechny testy</button>
+  <label><input type="checkbox" id="loud"> živý test pustit nahlas</label>
+  <div id="summary"></div>
+  <ul id="results"></ul>
+
+  <script src="../js/state.js"></script>
+  <script src="../js/audio.js"></script>
+  <script src="tests.js"></script>
+</body>
+</html>

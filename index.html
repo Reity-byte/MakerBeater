@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html lang="cs">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MakerBeater – piano roll</title>
+  <meta name="description" content="Webový hudební editor typu piano roll se syntetickými nástroji, bicími a exportem do WAV.">
+  <meta name="theme-color" content="#141821">
+  <link rel="icon" type="image/png" href="app/icon.png">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="topbar">
+    <button class="btn icon only-narrow" id="btnTracks" title="Seznam stop">
+      <svg viewBox="0 0 24 24"><path d="M3 18h18v-2H3v2zm0-5h18v-2H3v2zm0-7v2h18V6H3z"/></svg>
+    </button>
+    <div class="brand" title="MakerBeater"><span class="logo"></span><span class="brand-text">MakerBeater</span></div>
+
+    <!-- Transport -->
+    <div class="group">
+      <button id="btnPlay" class="btn icon primary" title="Přehrát / Pauza (mezerník = Play/Stop)">
+        <svg class="i-play" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
+        <svg class="i-pause" viewBox="0 0 24 24"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>
+      </button>
+      <button id="btnStop" class="btn icon" title="Stop (podruhé = na začátek)">
+        <svg viewBox="0 0 24 24"><path d="M6 6h12v12H6z"/></svg>
+      </button>
+      <button id="btnLoop" class="btn icon toggle" title="Smyčka (L) – oblast nastavíš tažením v pravítku">
+        <svg viewBox="0 0 24 24"><path d="M7 7h10v3l4-4-4-4v3H5v6h2V7zm10 10H7v-3l-4 4 4 4v-3h12v-6h-2v4z"/></svg>
+      </button>
+      <div class="lcd" title="Takt.doba.šestnáctina · čas">
+        <span id="posBar">1.1.1</span><span id="posTime">0:00.0</span>
+      </div>
+      <span class="rec-badge" id="recBadge" hidden title="Nahrává se – Stop nahrávání ukončí">● REC</span>
+    </div>
+
+    <!-- Skladba -->
+    <div class="group">
+      <label class="field" title="Tempo (doby za minutu)"><span>BPM</span><input id="inpBpm" type="number" min="30" max="300" step="1"></label>
+      <label class="field" title="Délka skladby v taktech"><span>Takty</span><input id="inpBars" type="number" min="1" max="128" step="1"></label>
+      <select id="selMeter" title="Doby v taktu">
+        <option value="2">2/4</option>
+        <option value="3">3/4</option>
+        <option value="4">4/4</option>
+        <option value="5">5/4</option>
+        <option value="6">6/4</option>
+        <option value="7">7/4</option>
+      </select>
+      <label class="field" title="Velikost kroku mřížky">
+        <span>Krok</span>
+        <select id="selStep">
+          <option value="1">1/4</option>
+          <option value="2">1/8</option>
+          <option value="4">1/16</option>
+        </select>
+      </label>
+    </div>
+
+    <!-- Stupnice -->
+    <div class="group">
+      <label class="field" title="Stupnice – tóny mimo ni jsou v mřížce tmavší">
+        <span>Stupnice</span>
+        <select id="selRoot"></select>
+        <select id="selScale"></select>
+      </label>
+      <button class="btn icon toggle" id="btnSnap" title="Přichytávat ke stupnici (S): noty jdou vložit jen na tóny stupnice, ↑↓ posouvá po stupních">
+        <svg viewBox="0 0 24 24"><path d="M3 7v6a9 9 0 0 0 18 0V7h-4v6a5 5 0 0 1-10 0V7H3zm14-2h4V2h-4v3zM3 5h4V2H3v3z"/></svg>
+      </button>
+    </div>
+
+    <!-- Nástroje editace + historie -->
+    <div class="group">
+      <div class="seg" role="group" aria-label="Nástroj">
+        <button class="btn icon tool" data-tool="draw" title="Kreslení (D): klik = nota, tah = délka">
+          <svg viewBox="0 0 24 24"><path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04a1 1 0 0 0 0-1.41l-2.34-2.34a1 1 0 0 0-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/></svg>
+        </button>
+        <button class="btn icon tool" data-tool="select" title="Výběr (V): tah = výběr obdélníkem, dvojklik = nota">
+          <svg viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="1.5" fill="none" stroke="currentColor" stroke-width="2" stroke-dasharray="3.2 2.6"/></svg>
+        </button>
+        <button class="btn icon tool" data-tool="erase" title="Guma (E): klik / tah přes noty = mazání">
+          <svg viewBox="0 0 24 24"><path d="M16.24 3.56l4.95 4.94c.78.79.78 2.05 0 2.84L12 20.53a4 4 0 0 1-5.66 0L2.81 17c-.78-.79-.78-2.05 0-2.84l10.6-10.6c.79-.78 2.05-.78 2.83 0zM4.22 15.58l3.54 3.53c.78.79 2.04.79 2.83 0l3.53-3.53-4.95-4.95-4.95 4.95z"/></svg>
+        </button>
+      </div>
+      <button class="btn icon" id="btnUndo" title="Zpět (Ctrl+Z)">
+        <svg viewBox="0 0 24 24"><path d="M12.5 8c-2.65 0-5.05.99-6.9 2.6L2 7v9h9l-3.62-3.62c1.39-1.16 3.16-1.88 5.12-1.88 3.54 0 6.55 2.31 7.6 5.5l2.37-.78C21.08 11.03 17.15 8 12.5 8z"/></svg>
+      </button>
+      <button class="btn icon" id="btnRedo" title="Znovu (Ctrl+Y / Ctrl+Shift+Z)">
+        <svg viewBox="0 0 24 24"><path d="M18.4 10.6C16.55 8.99 14.15 8 11.5 8c-4.65 0-8.58 3.03-9.96 7.22L3.9 16c1.05-3.19 4.05-5.5 7.6-5.5 1.95 0 3.73.72 5.12 1.88L13 16h9V7l-3.6 3.6z"/></svg>
+      </button>
+    </div>
+
+    <!-- Zobrazení -->
+    <div class="group">
+      <span class="mini-label" title="Vodorovný zoom (Ctrl + kolečko)">↔</span>
+      <button class="btn icon sm" id="btnZoomXOut" title="Oddálit vodorovně (-)">−</button>
+      <button class="btn icon sm" id="btnZoomXIn" title="Přiblížit vodorovně (+)">+</button>
+      <span class="mini-label" title="Svislý zoom (Alt + kolečko)">↕</span>
+      <button class="btn icon sm" id="btnZoomYOut" title="Oddálit svisle (Alt + kolečko)">−</button>
+      <button class="btn icon sm" id="btnZoomYIn" title="Přiblížit svisle (Alt + kolečko)">+</button>
+      <button class="btn icon toggle" id="btnFollow" title="Sledovat přehrávání (F)">
+        <svg viewBox="0 0 24 24"><path d="M12 4l-1.41 1.41L16.17 11H4v2h12.17l-5.58 5.59L12 20l8-8z"/></svg>
+      </button>
+      <button class="btn icon toggle" id="btnGhosts" title="Ukázat noty ostatních stop (G)">
+        <svg viewBox="0 0 24 24"><path d="M12 16l7.36-5.73L21 9l-9-7-9 7 1.63 1.27L12 16zm0 2.54l-7.38-5.73L3 14.07l9 7 9-7-1.63-1.27L12 18.54z"/></svg>
+      </button>
+    </div>
+
+    <!-- Master -->
+    <div class="group">
+      <label class="field" title="Celková hlasitost">
+        <svg class="field-icon" viewBox="0 0 24 24"><path d="M18.5 12A4.5 4.5 0 0 0 16 7.97v8.05c1.48-.73 2.5-2.25 2.5-4.02zM5 9v6h4l5 5V4L9 9H5z"/></svg>
+        <input type="range" id="masterVol" class="master-vol" min="0" max="1" step="0.01">
+      </label>
+    </div>
+
+    <!-- Projekt -->
+    <div class="group push-right">
+      <div class="menu-wrap">
+        <button class="btn" id="btnProject" title="Uložení, import a export">
+          <svg viewBox="0 0 24 24"><path d="M10 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2h-8l-2-2z"/></svg>
+          Projekt
+        </button>
+        <div class="menu menu-right" id="projectMenu" hidden>
+          <label class="menu-field">
+            <span>Název projektu</span>
+            <input type="text" id="inpName" maxlength="80" spellcheck="false">
+          </label>
+          <hr>
+          <button data-action="new">Nový prázdný projekt</button>
+          <button data-action="demo">Načíst ukázkovou skladbu</button>
+          <hr>
+          <button data-action="import">Importovat JSON…</button>
+          <button data-action="export-json">Exportovat JSON</button>
+          <hr>
+          <button data-action="export-wav">Exportovat WAV (celá skladba)</button>
+          <button data-action="record" id="btnRecord">Nahrát živě (MediaRecorder)</button>
+          <hr class="install-only" hidden>
+          <button data-action="install" class="install-only" hidden>Nainstalovat jako aplikaci</button>
+        </div>
+      </div>
+      <button class="btn icon" id="btnHelp" title="Nápověda a klávesové zkratky (F1)">?</button>
+    </div>
+  </header>
+
+  <main class="workspace">
+    <aside class="tracks" id="tracksPanel">
+      <div class="tracks-head">
+        <span>Stopy</span>
+        <button class="btn sm-text" id="btnAddTrack" title="Přidat novou stopu">+ Stopa</button>
+        <div class="menu" id="addTrackMenu" hidden></div>
+      </div>
+      <div class="track-list" id="trackList"></div>
+    </aside>
+
+    <section class="editor" id="editor">
+      <div class="corner" id="corner"></div>
+      <canvas id="rulerCanvas" title="Klik = skok · tah = oblast smyčky · dvojklik = smyčka přes celou skladbu"></canvas>
+      <canvas id="keysCanvas"></canvas>
+      <div class="grid-wrap" id="gridWrap">
+        <canvas id="gridCanvas"></canvas>
+        <div class="grid-scroll" id="gridScroll"><div id="gridSpacer"></div></div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="statusbar">
+    <span id="statusHint"></span>
+    <span class="status-right">
+      <label class="velocity" id="velocityBox" hidden title="Síla úhozu vybraných not">
+        Síla <input type="range" id="inpVelocity" min="0.05" max="1" step="0.01"> <output id="velocityOut"></output>
+      </label>
+      <span id="statusInfo"></span>
+      <span class="save-state" id="saveState"></span>
+    </span>
+  </footer>
+
+  <div class="audio-hint" id="audioHint">Zvuk se zapne po prvním kliknutí nebo stisku klávesy.</div>
+  <div class="toasts" id="toasts" aria-live="polite"></div>
+  <input type="file" id="fileImport" accept=".json,application/json" hidden>
+
+  <dialog class="help" id="helpDialog">
+    <form method="dialog" class="help-head">
+      <h2>Nápověda</h2>
+      <button class="btn icon" value="close" title="Zavřít (Esc)">✕</button>
+    </form>
+    <div class="help-body">
+      <section>
+        <h3>Myš v mřížce</h3>
+        <dl>
+          <dt>Klik do prázdna</dt><dd>nová nota (tažením doprava nastavíš délku)</dd>
+          <dt>Tah noty</dt><dd>přesun v čase i výšce (s Alt bez mřížky)</dd>
+          <dt>Tah pravého okraje</dt><dd>změna délky</dd>
+          <dt>Ctrl + tah noty</dt><dd>kopie</dd>
+          <dt>Pravé tlačítko</dt><dd>smazat (tahem víc not)</dd>
+          <dt>Shift / Ctrl + tah</dt><dd>výběr obdélníkem</dd>
+          <dt>Shift + klik</dt><dd>přidat / odebrat notu z výběru</dd>
+          <dt>Kolečko</dt><dd>posun · Shift = do stran · Ctrl = zoom · Alt = výška řádků</dd>
+          <dt>Prostřední tlačítko</dt><dd>posun plátna</dd>
+        </dl>
+      </section>
+      <section>
+        <h3>Klávesnice</h3>
+        <dl>
+          <dt>Mezerník</dt><dd>Play / Stop</dd>
+          <dt>Ctrl + Z / Ctrl + Y</dt><dd>zpět / znovu</dd>
+          <dt>Ctrl + C / X / V</dt><dd>kopírovat / vyjmout / vložit (pod kurzor myši)</dd>
+          <dt>Ctrl + D</dt><dd>duplikovat výběr za sebe</dd>
+          <dt>Ctrl + A · Esc</dt><dd>vybrat vše · zrušit výběr</dd>
+          <dt>Delete</dt><dd>smazat výběr</dd>
+          <dt>↑ ↓</dt><dd>o půltón (se zapnutým přichytáváním o stupeň stupnice), Shift = oktáva</dd>
+          <dt>← →</dt><dd>o krok mřížky, Shift = o takt</dd>
+          <dt>Q</dt><dd>kvantizovat: srovnat do mřížky a do stupnice</dd>
+          <dt>D · V · E</dt><dd>kreslení · výběr · guma</dd>
+          <dt>S · L · F · G</dt><dd>přichytávání · smyčka · sledování · duchové</dd>
+          <dt>+ / −</dt><dd>vodorovný zoom</dd>
+          <dt>Home</dt><dd>na začátek</dd>
+        </dl>
+      </section>
+      <section>
+        <h3>Ostatní</h3>
+        <dl>
+          <dt>Klávesy vlevo</dt><dd>klik = zahraje tón, tažením glissando</dd>
+          <dt>Pravítko</dt><dd>klik = skok · tah = oblast smyčky · dvojklik = celá skladba</dd>
+          <dt>Stopa</dt><dd>dvojklik na jméno = přejmenovat · dvojklik na posuvník = výchozí hodnota</dd>
+          <dt>Dotyk</dt><dd>ťuk = nota · tah = posun · dva prsty = zoom · mazání gumou</dd>
+          <dt>Ukládání</dt><dd>automaticky do prohlížeče; na přenos použij Projekt → Exportovat JSON</dd>
+        </dl>
+      </section>
+    </div>
+  </dialog>
+
+  <script src="js/state.js"></script>
+  <script src="js/audio.js"></script>
+  <script src="js/grid.js"></script>
+  <script src="js/main.js"></script>
+</body>
+</html>
