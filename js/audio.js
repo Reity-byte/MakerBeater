@@ -201,27 +201,80 @@
     return { input, output, reverbIn, comp, limiter };
   }
 
-  /** Kanál jedné stopy: bus → mute/solo → hlasitost → panorama → master (+ send do dozvuku). */
+  /**
+   * Kanál jedné stopy:
+   * bus → mute/solo → zkreslení → hlasitost → sidechain → panorama → master (+ send do dozvuku)
+   */
   function createStrip(ctx, master) {
-    const bus = ctx.createGain();      // sem hrají noty ze sekvenceru
-    const mute = ctx.createGain();     // mute / solo
-    const preview = ctx.createGain();  // náhledy při editaci – obchází mute
+    const bus = ctx.createGain();       // sem hrají noty ze sekvenceru
+    const mute = ctx.createGain();      // mute / solo
+    const preview = ctx.createGain();   // náhledy při editaci – obchází mute
+    const drive = ctx.createWaveShaper(); // zkreslení (bez křivky = jen propouští)
+    const driveOut = ctx.createGain();  // vyrovnání hlasitosti po zkreslení
     const volume = ctx.createGain();
+    const duck = ctx.createGain();      // sidechain: při kopáku se na chvíli ztiší
     const panner = ctx.createStereoPanner ? ctx.createStereoPanner() : ctx.createGain();
     const send = ctx.createGain();
     bus.connect(mute);
-    mute.connect(volume);
-    preview.connect(volume);
-    volume.connect(panner);
+    mute.connect(drive);
+    preview.connect(drive);
+    drive.connect(driveOut);
+    driveOut.connect(volume);
+    volume.connect(duck);
+    duck.connect(panner);
     panner.connect(master.input);
     panner.connect(send);
     send.connect(master.reverbIn);
-    return { bus, mute, preview, volume, panner, send, state: {}, applied: {} };
+    return { bus, mute, preview, drive, driveOut, volume, duck, panner, send, sidechain: 0, state: {}, applied: {} };
   }
 
   function disconnectStrip(strip) {
-    for (const node of [strip.bus, strip.mute, strip.preview, strip.volume, strip.panner, strip.send]) {
+    for (const node of [strip.bus, strip.mute, strip.preview, strip.drive, strip.driveOut,
+      strip.volume, strip.duck, strip.panner, strip.send]) {
       try { node.disconnect(); } catch (err) { /* nic */ }
+    }
+  }
+
+  // Křivky zkreslení podle síly (0–1), zaokrouhlené na setiny a uložené
+  const driveCurves = new Map();
+  function driveCurve(amount) {
+    const key = Math.round(amount * 100);
+    let curve = driveCurves.get(key);
+    if (!curve) {
+      const pre = 1 + 14 * (key / 100); // čím víc, tím dřív se vlna „ořízne“
+      curve = new Float32Array(2048);
+      for (let i = 0; i < curve.length; i++) {
+        const x = (i / (curve.length - 1)) * 2 - 1;
+        curve[i] = Math.tanh(pre * x) / pre;
+      }
+      driveCurves.set(key, curve);
+    }
+    return curve;
+  }
+
+  function applyDrive(strip, amount) {
+    const a = clamp(amount || 0, 0, 1);
+    if (strip.applied.drive === a) return;
+    strip.applied.drive = a;
+    if (a < 0.005) {
+      strip.drive.curve = null;
+      strip.driveOut.gain.value = 1;
+    } else {
+      strip.drive.curve = driveCurve(a);
+      strip.drive.oversample = '2x';
+      strip.driveOut.gain.value = 1 + 2 * a;
+    }
+  }
+
+  /**
+   * Sidechain „pumpování“: v čase kopáku se stopy se sidechainem ztiší
+   * a během ~0,2 s se vrátí. Typický zvuk house a EDM.
+   */
+  function duckStrips(strips, time) {
+    for (const s of strips) {
+      if (!s.sidechain) continue;
+      s.duck.gain.setTargetAtTime(1 - 0.9 * s.sidechain, time, 0.004);
+      s.duck.gain.setTargetAtTime(1, time + 0.05, 0.07);
     }
   }
 
@@ -241,7 +294,12 @@
     set('volume', strip.volume.gain, volumeToGain(clamp(track.volume, 0, 1)));
     if (strip.panner.pan) set('pan', strip.panner.pan, clamp(track.pan, -1, 1));
     set('send', strip.send.gain, clamp(track.reverb || 0, 0, 1) * 0.8);
+    applyDrive(strip, track.drive);
+    strip.sidechain = clamp(track.sidechain || 0, 0, 1);
   }
+
+  /** Je nota kopák (spouští sidechain ostatních stop)? */
+  const isKick = (track, pitch) => getInstrument(track.instrument).kind === 'drums' && pitch === 0;
 
   // ===========================================================================
   // Registr nástrojů
@@ -263,8 +321,98 @@
   const getInstrument = (id) => Instruments[id] || Instruments.piano;
 
   // ---------------------------------------------------------------------------
-  // Klavír: FM úder kladívka + dvě „struny“, rychlý útlum závislý na výšce tónu
+  // Předpočítané zvuky (struna klavíru, kytary) – LRU mezipaměť podle výšky tónu
   // ---------------------------------------------------------------------------
+  const bufferCache = new Map();
+
+  function cachedBuffer(ctx, key, make) {
+    const k = `${key}@${ctx.sampleRate}`;
+    let buf = bufferCache.get(k);
+    if (buf) {
+      bufferCache.delete(k); // LRU: posuneme na konec
+    } else {
+      const data = make(ctx.sampleRate);
+      buf = ctx.createBuffer(1, data.length, ctx.sampleRate);
+      buf.getChannelData(0).set(data);
+      if (bufferCache.size >= 64) bufferCache.delete(bufferCache.keys().next().value);
+    }
+    bufferCache.set(k, buf);
+    return buf;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Klavír: model struny. Alikvóty jsou kvůli tuhosti struny lehce „rozladěné“ nahoru
+  // (neharmoničnost), vyšší doznívají rychleji, každý tón mají dvě struny lehce proti
+  // sobě (přirozené vlnění) a doznívání je dvojité – rychlý úder, pak dlouhý dozvuk.
+  // ---------------------------------------------------------------------------
+  function pianoString(sr, pitch) {
+    const f0 = midiToFreq(pitch);
+    const t60 = clamp(7 - (pitch - 21) * 0.075, 1.2, 7);           // doznění na -60 dB
+    const n = Math.floor(sr * Math.min(t60 * 0.7, 4.5));
+    const out = new Float64Array(n);
+    const B = clamp(0.00012 * Math.pow(2, (pitch - 48) / 14), 0.00004, 0.004); // neharmoničnost
+    const tauSlow = t60 / 6.9;
+    const strike = 1 / 7.3;                                           // místo úderu kladívka
+    const limit = Math.min(sr * 0.45, 12000);
+    for (let k = 1; k <= 40; k++) {
+      const fk = k * f0 * Math.sqrt(1 + B * k * k);
+      if (fk > limit) break;
+      const amp = (Math.abs(Math.sin(Math.PI * k * strike)) + 0.05) / Math.pow(k, 1.05);
+      const tau = tauSlow / (1 + (k - 1) * 0.12 + fk / 3000);
+      const len = Math.min(n, Math.ceil(tau * 9.2 * sr));             // dál už je ticho (-80 dB)
+      const strings = k <= 8 ? [-0.6, 0.6] : [0];                     // centy rozladění strun
+      for (const cents of strings) {
+        const w = (2 * Math.PI * fk * Math.pow(2, cents / 1200)) / sr;
+        const cw = Math.cos(w);
+        const sw = Math.sin(w);
+        const ph = Math.random() * 2 * Math.PI;
+        let x = Math.cos(ph);
+        let y = Math.sin(ph);
+        const a = amp / strings.length;
+        const d1 = Math.exp(-1 / (tau * 0.18 * sr));                  // rychlá část útlumu
+        const d2 = Math.exp(-1 / (tau * sr));                         // pomalá část
+        let e1 = 0.55 * a;
+        let e2 = 0.45 * a;
+        for (let i = 0; i < len; i++) {
+          out[i] += y * (e1 + e2);
+          const nx = x * cw - y * sw;
+          y = x * sw + y * cw;
+          x = nx;
+          e1 *= d1;
+          e2 *= d2;
+        }
+      }
+    }
+    // úder kladívka: krátký tlumený šum
+    let lp = 0;
+    const hammer = Math.floor(sr * 0.02);
+    for (let i = 0; i < hammer; i++) {
+      lp += 0.25 * (Math.random() * 2 - 1 - lp);
+      out[i] += lp * 0.25 * (1 - i / hammer);
+    }
+    let peak = 1e-9;
+    for (let i = 0; i < n; i++) peak = Math.max(peak, Math.abs(out[i]));
+    const data = new Float32Array(n);
+    for (let i = 0; i < n; i++) data[i] = (out[i] / peak) * 0.9;
+    return data;
+  }
+
+  const pianoBuffer = (ctx, pitch) => cachedBuffer(ctx, `piano${pitch}`, (sr) => pianoString(sr, pitch));
+
+  /** Společné přehrání struny klavíru: síla úhozu = hlasitost i jas, puštění klávesy = dusítko. */
+  function playPianoString(v, ctx, pitch, time, dur, vel, { level, bright = 1, damp = 0.08 }) {
+    const buf = pianoBuffer(ctx, pitch);
+    const f0 = midiToFreq(pitch);
+    const src = v.buffer(buf);
+    const tone = v.filter('lowpass', Math.min(18000, (f0 * (3 + 25 * vel * vel) + 900) * bright), 0.3);
+    const amp = v.gain(0);
+    src.connect(tone).connect(amp).connect(v.out);
+    const end = Math.max(time + dur, time + 0.02);
+    amp.gain.setValueAtTime(level * (0.2 + 0.8 * vel), time);
+    amp.gain.setTargetAtTime(0, end, damp);
+    return { src, amp, stop: Math.min(end + damp * 6, time + buf.duration) };
+  }
+
   defineInstrument('piano', {
     name: 'Klavír',
     color: '#ffd43b',
@@ -273,39 +421,125 @@
     center: 64,
     play(ctx, dest, pitch, time, dur, vel) {
       const v = new Voice(ctx, dest);
+      const { stop } = playPianoString(v, ctx, pitch, time, dur, vel, { level: 0.75 });
+      return v.play(time, stop);
+    },
+  });
+
+  // ---------------------------------------------------------------------------
+  // Elektrické piano (Rhodes): FM syntéza jako legendární DX7 „E.Piano“ –
+  // měkké tělo (poměr 1:1) + krátký kovový „cink“ ladičky (1:14) a tremolo do stran.
+  // ---------------------------------------------------------------------------
+  defineInstrument('epiano', {
+    name: 'Elektrické piano',
+    color: '#ffc078',
+    volume: 0.8,
+    reverb: 0.25,
+    center: 62,
+    play(ctx, dest, pitch, time, dur, vel) {
+      const v = new Voice(ctx, dest);
       const f = midiToFreq(pitch);
-      const ring = clamp(3.2 - (pitch - 36) * 0.045, 0.6, 3.2); // hluboké tóny znějí déle
-      const peak = 0.4 * (0.35 + 0.65 * vel);
-      const end = time + dur;
-
-      // Barva: low-pass se postupně zavírá – struna ztrácí vyšší alikvóty.
-      const tone = v.filter('lowpass', Math.min(16000, f * (5 + 9 * vel)), 0.4);
-      tone.frequency.setTargetAtTime(Math.min(9000, f * 2.5 + 500), time + 0.01, ring * 0.25);
+      const ring = clamp(3.5 - (pitch - 40) * 0.04, 0.8, 3.5);
+      const end = Math.max(time + dur, time + 0.01);
       const amp = v.gain(0);
-      tone.connect(amp).connect(v.out);
+      const pan = v.panner(0);
+      if (pan.pan) v.osc('sine', 4.2).connect(v.gain(0.3)).connect(pan.pan); // tremolo do stran
+      amp.connect(pan).connect(v.out);
 
-      // FM pár 1:1 – tvrdý úder kladívka, který během ~0,1 s změkne.
-      const car = v.osc('sine', f);
-      const mod = v.osc('sine', f);
-      const depth = v.gain(0);
-      depth.gain.setValueAtTime(f * (0.8 + 1.6 * vel), time);
-      depth.gain.setTargetAtTime(f * 0.1, time, 0.1);
-      mod.connect(depth).connect(car.frequency);
-      car.connect(tone);
+      const body = v.osc('sine', f);
+      const bodyMod = v.osc('sine', f);
+      const bodyIdx = v.gain(0);
+      bodyIdx.gain.setValueAtTime(f * (0.3 + 1.4 * vel * vel), time);
+      bodyIdx.gain.setTargetAtTime(f * 0.12, time, 0.3);
+      bodyMod.connect(bodyIdx).connect(body.frequency);
+      body.connect(amp);
 
-      // Druhá struna lehce rozladěná (chorus) + tichý alikvót o oktávu výš.
-      v.osc('triangle', f, 3).connect(v.gain(0.3)).connect(tone);
-      v.osc('sine', f * 2, -4).connect(v.gain(0.1 + 0.1 * vel)).connect(tone);
+      const tine = v.osc('sine', f);
+      const tineMod = v.osc('sine', f * 14);
+      const tineIdx = v.gain(0);
+      tineIdx.gain.setValueAtTime(f * 14 * 0.35 * vel, time);
+      tineIdx.gain.setTargetAtTime(0, time, 0.03);
+      tineMod.connect(tineIdx).connect(tine.frequency);
+      const tineAmp = v.gain(0);
+      hit(tineAmp.gain, time, 0.3 * vel, 0.25);
+      tine.connect(tineAmp).connect(amp);
 
-      // Obálka: náběh 4 ms → rychlý pokles → dlouhé doznívání → dusítko po puštění klávesy.
       const g = amp.gain;
+      const peak = 0.42 * (0.3 + 0.7 * vel);
       g.setValueAtTime(0, time);
-      g.linearRampToValueAtTime(peak, time + 0.004);
-      g.setTargetAtTime(peak * 0.45, time + 0.004, 0.08);
-      if (end > time + 0.25) g.setTargetAtTime(0, time + 0.25, ring / 3);
-      g.setTargetAtTime(0, Math.max(end, time + 0.004), 0.05);
-      const stop = Math.min(Math.max(end, time + 0.004) + 0.3, time + 0.25 + ring * 1.7);
-      return v.play(time, Math.max(stop, time + 0.05));
+      g.linearRampToValueAtTime(peak, time + 0.003);
+      g.setTargetAtTime(0, time + 0.003, ring / 3);
+      g.setTargetAtTime(0, end, 0.08);
+      return v.play(time, Math.min(end + 0.5, time + ring * 2));
+    },
+  });
+
+  // ---------------------------------------------------------------------------
+  // House piano: jasná struna + varhanní vrstva – zvuk klavírních akordů z 90s house
+  // (ve stylu Korg M1 „Piano 8'“).
+  // ---------------------------------------------------------------------------
+  defineInstrument('housepiano', {
+    name: 'House piano',
+    color: '#fab005',
+    volume: 0.75,
+    reverb: 0.2,
+    center: 64,
+    play(ctx, dest, pitch, time, dur, vel) {
+      const v = new Voice(ctx, dest);
+      const f = midiToFreq(pitch);
+      const { stop } = playPianoString(v, ctx, pitch, time, dur, vel, { level: 0.6, bright: 1.6, damp: 0.05 });
+      const organ = v.gain(0);
+      for (const [mult, g, det] of [[1, 0.5, 0], [1, 0.3, 7], [2, 0.3, 0], [4, 0.12, 0]]) {
+        v.osc('sine', f * mult, det).connect(v.gain(g)).connect(organ);
+      }
+      organ.connect(v.out);
+      const end = adsr(organ.gain, time, dur, { a: 0.004, d: 0.35, s: 0.35, r: 0.08 }, 0.3 * (0.4 + 0.6 * vel));
+      return v.play(time, Math.max(stop, end));
+    },
+  });
+
+  // ---------------------------------------------------------------------------
+  // Lo-fi piano: struna klavíru „z kazety“ – kolísání ladění, ztlumené výšky a šum
+  // ---------------------------------------------------------------------------
+  defineInstrument('lofipiano', {
+    name: 'Lo-fi piano',
+    color: '#d8a47f',
+    volume: 0.8,
+    reverb: 0.35,
+    center: 62,
+    play(ctx, dest, pitch, time, dur, vel) {
+      const v = new Voice(ctx, dest);
+      const { src, amp, stop } = playPianoString(v, ctx, pitch, time, dur, vel, { level: 0.95, bright: 0.45, damp: 0.12 });
+      const wow = v.osc('sine', 0.55 + Math.random() * 0.2);              // pomalé kolísání pásku
+      wow.connect(v.gain(14)).connect(src.detune);
+      const hiss = v.noise();
+      hiss.connect(v.filter('highpass', 3000)).connect(v.gain(0.012)).connect(amp);
+      return v.play(time, stop);
+    },
+  });
+
+  // ---------------------------------------------------------------------------
+  // Supersaw: sedm rozladěných pil rozložených do sterea – široký „trance/edm“ lead
+  // ---------------------------------------------------------------------------
+  defineInstrument('supersaw', {
+    name: 'Supersaw',
+    color: '#9775fa',
+    volume: 0.7,
+    reverb: 0.3,
+    center: 72,
+    play(ctx, dest, pitch, time, dur, vel) {
+      const v = new Voice(ctx, dest);
+      const f = midiToFreq(pitch);
+      const lp = v.filter('lowpass', Math.min(16000, 3000 + 9000 * vel), 0.7);
+      const hp = v.filter('highpass', f * 0.8, 0.5);                      // pod základním tónem nic
+      const amp = v.gain(0);
+      hp.connect(lp).connect(amp).connect(v.out);
+      const detunes = [-25, -14, -5, 0, 5, 14, 25];
+      detunes.forEach((d, i) => {
+        v.osc('sawtooth', f, d).connect(v.gain(i === 3 ? 0.2 : 0.14)).connect(v.panner((i - 3) / 3.5)).connect(hp);
+      });
+      const end = adsr(amp.gain, time, dur, { a: 0.01, d: 0.3, s: 0.8, r: 0.25 }, 0.9 * (0.5 + 0.5 * vel));
+      return v.play(time, end + 0.02);
     },
   });
 
@@ -431,8 +665,6 @@
   // Kytara: Karplus-Strong – syntéza struny ze šumu (zpožďovací smyčka + filtr).
   // Vzorek se spočítá jednou pro každou výšku tónu a uloží do cache.
   // ---------------------------------------------------------------------------
-  const ksCache = new Map();
-
   function karplusStrong(sampleRate, pitch) {
     const f = midiToFreq(pitch);
     const t60 = clamp(4.2 - (pitch - 40) * 0.065, 0.9, 4.2); // doba doznění na -60 dB
@@ -469,20 +701,7 @@
     return data;
   }
 
-  function ksBuffer(ctx, pitch) {
-    const key = `${ctx.sampleRate}:${pitch}`;
-    let buf = ksCache.get(key);
-    if (buf) {
-      ksCache.delete(key); // LRU: posuneme na konec
-    } else {
-      const data = karplusStrong(ctx.sampleRate, pitch);
-      buf = ctx.createBuffer(1, data.length, ctx.sampleRate);
-      buf.getChannelData(0).set(data);
-      if (ksCache.size > 48) ksCache.delete(ksCache.keys().next().value);
-    }
-    ksCache.set(key, buf);
-    return buf;
-  }
+  const ksBuffer = (ctx, pitch) => cachedBuffer(ctx, `ks${pitch}`, (sr) => karplusStrong(sr, pitch));
 
   defineInstrument('guitar', {
     name: 'Kytara',
@@ -563,7 +782,8 @@
   });
 
   // ---------------------------------------------------------------------------
-  // Bicí: každý řádek mřížky je jiný nástroj. Vše syntetické (808 styl).
+  // Bicí: každý řádek mřížky je jiný úder. Tři sady (808, 909 house, breakbeat)
+  // mají stejné řádky, takže jde sadu přepnout a noty zůstanou. Vše syntetické.
   // ---------------------------------------------------------------------------
   const DRUM_ROWS = [
     { id: 'kick', name: 'Kick' },
@@ -578,6 +798,7 @@
     { id: 'ride', name: 'Ride' },
     { id: 'crash', name: 'Crash' },
     { id: 'cowbell', name: 'Cowbell' },
+    { id: 'shaker', name: 'Shaker' },
   ];
   const DRUM_INDEX = Object.fromEntries(DRUM_ROWS.map((d, i) => [d.id, i]));
 
@@ -637,18 +858,41 @@
     });
   }
 
-  function tom(v, t, vel, f0) {
+  function tom(v, t, vel, f0, noise = 0.25) {
     const o = v.osc('sine', f0);
     o.frequency.setValueAtTime(f0 * 1.6, t);
     o.frequency.exponentialRampToValueAtTime(f0, t + 0.09);
     const g = v.gain(0);
     hit(g.gain, t, vel * 0.85, 0.15, 0.003);
     o.connect(g).connect(v.out);
-    noiseHit(v, t, { type: 'bandpass', freq: f0 * 5, q: 1, peak: vel * 0.25, tau: 0.015 }).connect(v.out);
+    noiseHit(v, t, { type: 'bandpass', freq: f0 * 5, q: 1, peak: vel * noise, tau: 0.015 }).connect(v.out);
   }
 
-  /** Syntéza jednotlivých bicích – každá funkce postaví zvuk do hlasu v. */
-  const DRUM_SYNTH = {
+  /** Tělo virblu: tón, který rychle klesne a utichne. */
+  function drumTone(v, t, type, f0, f1, peak, tau) {
+    const o = v.osc(type, f0);
+    o.frequency.setValueAtTime(f0, t);
+    o.frequency.exponentialRampToValueAtTime(f1, t + 0.05);
+    const g = v.gain(0);
+    hit(g.gain, t, peak, tau);
+    o.connect(g).connect(v.out);
+  }
+
+  /** Tlesknutí: několik rychlých „plesknutí“ po sobě a doznění. */
+  function clapBursts(v, t, vel, { bursts, gap, freq, q, tail }) {
+    const n = v.noise(0.6);
+    const g = v.gain(0);
+    for (let i = 0; i < bursts; i++) {
+      g.gain.setValueAtTime(vel * 0.9, t + i * gap);
+      g.gain.setTargetAtTime(vel * 0.12, t + i * gap + 0.001, 0.004);
+    }
+    g.gain.setValueAtTime(vel * 0.8, t + bursts * gap);
+    g.gain.setTargetAtTime(0, t + bursts * gap, tail);
+    n.connect(v.filter('bandpass', freq, q)).connect(v.filter('highpass', 700)).connect(g).connect(v.out);
+  }
+
+  // --- Sada 808: elektronická klasika (hip-hop, pop, trap) ---
+  const SYNTH_808 = {
     kick(v, t, vel) {
       const o = v.osc('sine', 155);
       o.frequency.setValueAtTime(155, t);
@@ -659,25 +903,11 @@
       noiseHit(v, t, { freq: 1800, peak: vel * 0.3, tau: 0.006 }).connect(v.out); // klik paličky
     },
     snare(v, t, vel) {
-      const body = v.osc('triangle', 220);
-      body.frequency.setValueAtTime(220, t);
-      body.frequency.exponentialRampToValueAtTime(160, t + 0.06);
-      const bg = v.gain(0);
-      hit(bg.gain, t, vel * 0.7, 0.035);
-      body.connect(bg).connect(v.out);
+      drumTone(v, t, 'triangle', 220, 160, vel * 0.7, 0.035);
       noiseHit(v, t, { freq: 1400, peak: vel * 0.6, tau: 0.055 }).connect(v.out); // struník
     },
     clap(v, t, vel) {
-      const n = v.noise(0.4);
-      const g = v.gain(0);
-      // tři rychlá „tlesknutí“ těsně po sobě a pak doznění
-      for (const dt of [0, 0.011, 0.022]) {
-        g.gain.setValueAtTime(vel * 0.9, t + dt);
-        g.gain.setTargetAtTime(vel * 0.12, t + dt + 0.001, 0.004);
-      }
-      g.gain.setValueAtTime(vel * 0.8, t + 0.033);
-      g.gain.setTargetAtTime(0, t + 0.033, 0.07);
-      n.connect(v.filter('bandpass', 1300, 1.1)).connect(v.filter('highpass', 700)).connect(g).connect(v.out);
+      clapBursts(v, t, vel, { bursts: 3, gap: 0.011, freq: 1300, q: 1.1, tail: 0.07 });
     },
     rim(v, t, vel) {
       const bp = v.filter('bandpass', 1900, 2.5);
@@ -719,37 +949,154 @@
       g.gain.setTargetAtTime(0, t + 0.05, 0.1);
       mix.connect(v.filter('bandpass', 1100, 1.4)).connect(g).connect(v.out);
     },
+    shaker(v, t, vel) {
+      const n = v.noise(0.15);
+      const g = v.gain(0);
+      g.gain.setValueAtTime(0, t);
+      g.gain.linearRampToValueAtTime(vel * 0.6, t + 0.012); // zrnka se rozjedou postupně
+      g.gain.setTargetAtTime(0, t + 0.012, 0.03);
+      n.connect(v.filter('bandpass', 6500, 1.4)).connect(v.filter('highpass', 4000)).connect(g).connect(v.out);
+    },
   };
 
-  /** Délka zvuku (s) – po ní je hlas ticho. */
-  const DRUM_LENGTH = {
+  // --- Sada 909: house a techno – dunivý kick, jasný virbl a hi-haty ---
+  const SYNTH_909 = Object.assign({}, SYNTH_808, {
+    kick(v, t, vel) {
+      const o = v.osc('sine', 260);
+      o.frequency.setValueAtTime(260, t);
+      o.frequency.exponentialRampToValueAtTime(52, t + 0.06);
+      const g = v.gain(0);
+      hit(g.gain, t, vel, 0.2, 0.002);
+      o.connect(softClip(v.ctx)).connect(g).connect(v.out);
+      noiseHit(v, t, { freq: 2500, peak: vel * 0.45, tau: 0.004 }).connect(v.out);
+    },
+    snare(v, t, vel) {
+      drumTone(v, t, 'triangle', 185, 175, vel * 0.55, 0.045);
+      drumTone(v, t, 'triangle', 330, 315, vel * 0.3, 0.045);
+      noiseHit(v, t, { freq: 1800, peak: vel * 0.65, tau: 0.075 }).connect(v.out);
+    },
+    clap(v, t, vel) {
+      clapBursts(v, t, vel, { bursts: 4, gap: 0.009, freq: 1500, q: 1.6, tail: 0.12 });
+    },
+    tomLow: (v, t, vel) => tom(v, t, vel, 110, 0.35),
+    tomMid: (v, t, vel) => tom(v, t, vel, 150, 0.35),
+    tomHigh: (v, t, vel) => tom(v, t, vel, 210, 0.35),
+    hatClosed(v, t, vel) {
+      noiseHit(v, t, { freq: 8000, peak: vel * 0.6, tau: 0.022 }).connect(v.out);
+      metal(v, t, vel, { tau: 0.02, peak: 0.6, bp: 10500 }).connect(v.out);
+    },
+    hatOpen(v, t, vel) {
+      noiseHit(v, t, { freq: 8000, peak: vel * 0.45, tau: 0.2 }).connect(v.out);
+      metal(v, t, vel, { tau: 0.2, peak: 0.6, bp: 10500 }).connect(v.out);
+    },
+    ride(v, t, vel) {
+      metal(v, t, vel, { tau: 0.6, mult: 1.6, bp: 9000, hp: 6000, peak: 0.9 }).connect(v.out);
+      noiseHit(v, t, { freq: 7000, peak: vel * 0.12, tau: 0.5, length: 2.2 }).connect(v.out);
+    },
+  });
+
+  // --- Sada breakbeat: akustičtější údery jako z nasamplovaných breaků (jungle, breakcore) ---
+  const SYNTH_BREAK = Object.assign({}, SYNTH_808, {
+    kick(v, t, vel) {
+      const o = v.osc('sine', 130);
+      o.frequency.setValueAtTime(130, t);
+      o.frequency.exponentialRampToValueAtTime(58, t + 0.045);
+      const g = v.gain(0);
+      hit(g.gain, t, vel * 0.95, 0.09, 0.001);
+      o.connect(softClip(v.ctx)).connect(g).connect(v.out);
+      noiseHit(v, t, { type: 'lowpass', freq: 1500, peak: vel * 0.5, tau: 0.015 }).connect(v.out); // „buch“ blány
+      noiseHit(v, t, { freq: 3500, peak: vel * 0.25, tau: 0.003 }).connect(v.out);                   // klik paličky
+    },
+    snare(v, t, vel) {
+      drumTone(v, t, 'triangle', 200, 175, vel * 0.5, 0.06);
+      drumTone(v, t, 'sine', 330, 300, vel * 0.25, 0.05);
+      noiseHit(v, t, { type: 'bandpass', freq: 3200, q: 0.7, peak: vel * 0.75, tau: 0.1 }).connect(v.out);
+      noiseHit(v, t, { freq: 6500, peak: vel * 0.3, tau: 0.05 }).connect(v.out);                     // struník
+      noiseHit(v, t, { type: 'lowpass', freq: 4000, peak: vel * 0.15, tau: 0.2, length: 0.6 }).connect(v.out); // místnost
+    },
+    tomLow: (v, t, vel) => tom(v, t, vel, 90, 0.4),
+    tomMid: (v, t, vel) => tom(v, t, vel, 130, 0.4),
+    tomHigh: (v, t, vel) => tom(v, t, vel, 180, 0.4),
+    hatClosed(v, t, vel) {
+      noiseHit(v, t, { freq: 7000, peak: vel * 0.5, tau: 0.03 }).connect(v.out);
+      metal(v, t, vel, { tau: 0.025, peak: 0.5, bp: 9000, hp: 6000 }).connect(v.out);
+    },
+    hatOpen(v, t, vel) {
+      noiseHit(v, t, { freq: 7000, peak: vel * 0.4, tau: 0.22 }).connect(v.out);
+      metal(v, t, vel, { tau: 0.22, peak: 0.5, bp: 9000, hp: 6000 }).connect(v.out);
+    },
+    ride(v, t, vel) {
+      metal(v, t, vel, { tau: 0.9, mult: 1.3, bp: 7000, hp: 4500, peak: 0.9 }).connect(v.out);
+      const pg = v.gain(0);
+      hit(pg.gain, t, vel * 0.12, 0.5);
+      v.osc('sine', 2600).connect(pg).connect(v.out); // zvon ride činelu
+    },
+  });
+
+  const LEN_808 = {
     kick: 0.8, snare: 0.4, clap: 0.45, rim: 0.12, tomLow: 0.9, tomMid: 0.9, tomHigh: 0.9,
-    hatClosed: 0.16, hatOpen: 1, ride: 1.8, crash: 2.8, cowbell: 0.7,
+    hatClosed: 0.16, hatOpen: 1, ride: 1.8, crash: 2.8, cowbell: 0.7, shaker: 0.15,
   };
 
-  /** Vyvážení hlasitostí jednotlivých bicích (změřeno offline renderem). */
-  const DRUM_LEVEL = {
-    kick: 0.85, snare: 0.8, clap: 2, rim: 1, tomLow: 0.8, tomMid: 0.8, tomHigh: 0.8,
-    hatClosed: 1.6, hatOpen: 1.6, ride: 1.7, crash: 1, cowbell: 2,
+  /**
+   * Bicí sady. `level` = vyvážení hlasitostí úderů (změřeno offline renderem),
+   * `grit` = zvuk se po vyrenderování „ušpiní“ jako ze starého sampleru.
+   */
+  const KITS = {
+    drums: {
+      name: 'Bicí 808',
+      color: '#ff6b6b',
+      reverb: 0.08,
+      synth: SYNTH_808,
+      length: LEN_808,
+      level: {
+        kick: 0.85, snare: 0.8, clap: 2, rim: 1, tomLow: 0.8, tomMid: 0.8, tomHigh: 0.8,
+        hatClosed: 1.6, hatOpen: 1.6, ride: 1.7, crash: 1, cowbell: 2, shaker: 1,
+      },
+    },
+    drums909: {
+      name: 'Bicí 909 (house)',
+      color: '#ff8787',
+      reverb: 0.1,
+      synth: SYNTH_909,
+      length: Object.assign({}, LEN_808, { kick: 1, snare: 0.45, clap: 0.6, hatClosed: 0.15, hatOpen: 1.1, ride: 2.2 }),
+      level: {
+        kick: 0.75, snare: 0.8, clap: 1.6, rim: 1, tomLow: 0.8, tomMid: 0.8, tomHigh: 0.8,
+        hatClosed: 0.6, hatOpen: 0.7, ride: 1.4, crash: 1, cowbell: 2, shaker: 1,
+      },
+    },
+    drumsBreak: {
+      name: 'Bicí breakbeat',
+      color: '#f783ac',
+      reverb: 0.12,
+      synth: SYNTH_BREAK,
+      length: Object.assign({}, LEN_808, { kick: 0.5, snare: 0.6, hatClosed: 0.18, hatOpen: 1.1, ride: 2.4 }),
+      grit: true,
+      level: {
+        kick: 0.85, snare: 0.7, clap: 1.4, rim: 0.7, tomLow: 0.6, tomMid: 0.6, tomHigh: 0.6,
+        hatClosed: 0.45, hatOpen: 0.5, ride: 0.8, crash: 0.65, cowbell: 1.3, shaker: 0.6,
+      },
+    },
   };
 
   // ---------------------------------------------------------------------------
-  // Předrenderovaná bicí sada
+  // Předrenderované bicí sady
   // ---------------------------------------------------------------------------
   // Syntéza hi-hatu nebo činelu (6 oscilátorů + filtry) je pro procesor drahá a
   // v rychlých rytmech jich zní spousta naráz. Proto se každý zvuk při startu jednou
   // vyrenderuje (stejnou syntézou jako výše) do AudioBufferu a pak se jen přehrává.
   // Šumové zvuky mají víc variant, ať opakované údery nezní strojově.
 
-  const DRUM_VARIANTS = { snare: 2, clap: 2, hatClosed: 3, hatOpen: 2 };
-  const drumKits = new Map(); // sampleRate → { buffers, promise }
+  const DRUM_VARIANTS = { snare: 2, clap: 2, hatClosed: 3, hatOpen: 2, shaker: 3 };
+  const drumKits = new Map(); // `${sada}@${sampleRate}` → { buffers, promise }
 
-  function prepareDrumKit(sampleRate) {
-    let kit = drumKits.get(sampleRate);
+  function prepareKit(kitId, sampleRate) {
+    const key = `${kitId}@${sampleRate}`;
+    let kit = drumKits.get(key);
     if (!kit) {
       kit = { buffers: null, promise: null };
-      drumKits.set(sampleRate, kit);
-      kit.promise = renderDrumKit(sampleRate)
+      drumKits.set(key, kit);
+      kit.promise = renderKit(KITS[kitId], sampleRate)
         .then((buffers) => { kit.buffers = buffers; })
         .catch((err) => console.warn('[MB] bicí nejdou předrenderovat, hraje živá syntéza', err))
         .then(() => kit);
@@ -757,62 +1104,96 @@
     return kit.promise;
   }
 
-  async function renderDrumKit(sampleRate) {
+  /** Připraví bicí sady (výchozí: všechny) pro danou vzorkovací frekvenci. */
+  function prepareDrumKit(sampleRate, kitIds = Object.keys(KITS)) {
+    return Promise.all(kitIds.map((id) => prepareKit(id, sampleRate)));
+  }
+
+  /** „Špína“ starého sampleru (SP-1200): 26 kHz, 12 bitů a lehké přebuzení. */
+  function samplerGrit(data, sr) {
+    const step = 26040 / sr;
+    let phase = 1;
+    let held = 0;
+    for (let i = 0; i < data.length; i++) {
+      phase += step;
+      if (phase >= 1) {
+        phase -= 1;
+        held = Math.tanh(data[i] * 1.5) / Math.tanh(1.5);
+      }
+      data[i] = Math.round(held * 2047) / 2047;
+    }
+  }
+
+  async function renderKit(kit, sampleRate) {
     // všechny zvuky za sebou do jednoho offline kontextu, pak výsledek rozstříháme
     const slots = [];
     let time = 0;
     for (const row of DRUM_ROWS) {
       for (let k = 0; k < (DRUM_VARIANTS[row.id] || 1); k++) {
         slots.push({ id: row.id, start: time });
-        time += DRUM_LENGTH[row.id] + 0.02;
+        time += kit.length[row.id] + 0.02;
       }
     }
     const OAC = window.OfflineAudioContext || window.webkitOfflineAudioContext;
     const ctx = new OAC(1, Math.ceil(time * sampleRate), sampleRate);
     for (const s of slots) {
       const v = new Voice(ctx, ctx.destination);
-      DRUM_SYNTH[s.id](v, s.start, 1);
-      v.play(s.start, s.start + DRUM_LENGTH[s.id]);
+      kit.synth[s.id](v, s.start, 1);
+      v.play(s.start, s.start + kit.length[s.id]);
     }
     const data = (await ctx.startRendering()).getChannelData(0);
     const buffers = {};
     for (const s of slots) {
       const from = Math.round(s.start * sampleRate);
-      const n = Math.round(DRUM_LENGTH[s.id] * sampleRate);
+      const n = Math.round(kit.length[s.id] * sampleRate);
       const buf = ctx.createBuffer(1, n, sampleRate);
-      buf.getChannelData(0).set(data.subarray(from, from + n));
+      const part = buf.getChannelData(0);
+      part.set(data.subarray(from, from + n));
+      if (kit.grit) samplerGrit(part, sampleRate);
       (buffers[s.id] = buffers[s.id] || []).push(buf);
     }
     return buffers;
   }
 
-  defineInstrument('drums', {
-    name: 'Bicí',
-    kind: 'drums',
-    color: '#ff6b6b',
-    volume: 0.85,
-    reverb: 0.08,
-    rows: DRUM_ROWS,
-    play(ctx, dest, row, time, dur, vel, state = {}) {
-      const def = DRUM_ROWS[row];
-      if (!def) return null;
-      const id = def.id;
-      const v = new Voice(ctx, dest);
-      v.out.gain.value = DRUM_LEVEL[id];
-      if (id === 'hatClosed' || id === 'hatOpen') chokeHats(state, time);
-      if (id === 'hatOpen') {
-        state.openHats = (state.openHats || []).concat({ node: v.out, level: DRUM_LEVEL[id], start: time, end: time + DRUM_LENGTH[id] });
-      }
-      const kit = drumKits.get(ctx.sampleRate);
-      if (kit && kit.buffers) { // rychlá cesta: předrenderovaný úder
-        const variants = kit.buffers[id];
-        v.buffer(variants[Math.floor(Math.random() * variants.length)]).connect(v.gain(vel)).connect(v.out);
-      } else {                  // sada ještě není hotová → živá syntéza
-        DRUM_SYNTH[id](v, time, vel);
-      }
-      return v.play(time, time + DRUM_LENGTH[id]);
-    },
-  });
+  // Každá sada je samostatný „nástroj“ druhu 'drums'.
+  // play(…, tune) – ladění úderu v půltónech (přehraje se rychleji/pomaleji, jako na sampleru).
+  for (const [kitId, kit] of Object.entries(KITS)) {
+    defineInstrument(kitId, {
+      name: kit.name,
+      kind: 'drums',
+      kit: kitId,
+      color: kit.color,
+      volume: 0.85,
+      reverb: kit.reverb,
+      rows: DRUM_ROWS,
+      play(ctx, dest, row, time, dur, vel, state = {}, tune = 0) {
+        const def = DRUM_ROWS[row];
+        if (!def) return null;
+        const id = def.id;
+        const level = kit.level[id] || 1;
+        const ready = drumKits.get(`${kitId}@${ctx.sampleRate}`);
+        const prerendered = !!(ready && ready.buffers);
+        // ladění jde jen u předrenderovaného úderu (přehraje se rychleji / pomaleji)
+        const rate = prerendered ? Math.pow(2, clamp(tune || 0, -24, 24) / 12) : 1;
+        const length = kit.length[id] / rate;
+        const v = new Voice(ctx, dest);
+        v.out.gain.value = level;
+        if (id === 'hatClosed' || id === 'hatOpen') chokeHats(state, time);
+        if (id === 'hatOpen') {
+          state.openHats = (state.openHats || []).concat({ node: v.out, level, start: time, end: time + length });
+        }
+        if (prerendered) {
+          const variants = ready.buffers[id];
+          const src = v.buffer(variants[Math.floor(Math.random() * variants.length)]);
+          src.playbackRate.value = rate;
+          src.connect(v.gain(vel)).connect(v.out);
+        } else { // sada ještě není hotová → živá syntéza
+          kit.synth[id](v, time, vel);
+        }
+        return v.play(time, time + length);
+      },
+    });
+  }
 
   // ===========================================================================
   // Engine – živý AudioContext, kanály stop a znějící hlasy
@@ -878,12 +1259,14 @@
       return this.strips.get(track.id) || null;
     },
 
-    /** Naplánuje notu stopy na přesný čas AudioContextu. */
-    playNote(track, pitch, time, dur, vel) {
+    /** Naplánuje notu stopy na přesný čas AudioContextu (`tune` = ladění bicích v půltónech). */
+    playNote(track, pitch, time, dur, vel, tune = 0) {
       const strip = this._strip(track);
       if (!strip) return null;
-      const voice = getInstrument(track.instrument).play(this.ctx, strip.bus, pitch, time, dur, vel, strip.state);
+      const voice = getInstrument(track.instrument).play(this.ctx, strip.bus, pitch, time, dur, vel, strip.state, tune);
       if (voice) this.voices.push(voice);
+      // kopák slyšitelné stopy „zmáčkne“ stopy se sidechainem
+      if (strip.applied.mute === 1 && isKick(track, pitch)) duckStrips(this.strips.values(), time);
       return voice;
     },
 
@@ -891,12 +1274,12 @@
      * Okamžitý náhled tónu (klik na klávesu / vložení noty). Zní i u ztlumené stopy.
      * Při úplně prvním kliknutí se AudioContext teprve rozbíhá – nota zazní hned, jak naběhne.
      */
-    preview(track, pitch, dur = 0.4, vel = 0.8) {
+    preview(track, pitch, dur = 0.4, vel = 0.8, tune = 0) {
       if (!this.ctx || this.ctx.state === 'closed') return null;
       const strip = this._strip(track);
       if (!strip) return null;
       const t = this.ctx.currentTime + 0.005;
-      const voice = getInstrument(track.instrument).play(this.ctx, strip.preview, pitch, t, dur, vel, {});
+      const voice = getInstrument(track.instrument).play(this.ctx, strip.preview, pitch, t, dur, vel, {}, tune);
       if (voice) this.voices.push(voice);
       return voice;
     },
@@ -1155,7 +1538,7 @@
       for (const [track, n] of events) {
         const time = anchor.time + (n.start - anchor.tick) * anchor.spt;
         const len = Math.min(n.length, regionEnd - n.start); // na konci smyčky notu ořízneme
-        Engine.playNote(track, n.pitch, time, len * anchor.spt, n.velocity);
+        Engine.playNote(track, n.pitch, time, len * anchor.spt, n.velocity, n.tune || 0);
       }
     },
 
@@ -1165,7 +1548,7 @@
         if (getInstrument(track.instrument).kind !== 'melodic') continue;
         for (const n of track.notes) {
           if (n.start < tick && n.start + n.length > tick + 1) {
-            Engine.playNote(track, n.pitch, time, (n.start + n.length - tick) * spt, n.velocity);
+            Engine.playNote(track, n.pitch, time, (n.start + n.length - tick) * spt, n.velocity, n.tune || 0);
           }
         }
       }
@@ -1195,16 +1578,18 @@
     const master = buildMaster(ctx);
     const anySolo = project.tracks.some((t) => t.solo);
 
+    const strips = [];
     const events = [];
     for (const track of project.tracks) {
       if (!isAudible(track, anySolo)) continue;
       const strip = createStrip(ctx, master);
       applyStrip(ctx, strip, track, true, true);
+      strips.push(strip);
       const inst = getInstrument(track.instrument);
       for (const n of track.notes) {
         if (n.start >= songEnd) continue;
         const len = Math.min(n.length, songEnd - n.start);
-        events.push({ time: t0 + n.start * spt, dur: len * spt, n, inst, strip });
+        events.push({ time: t0 + n.start * spt, dur: len * spt, n, inst, strip, track });
       }
     }
     events.sort((a, b) => a.time - b.time);
@@ -1214,8 +1599,9 @@
     const scheduleUntil = (until) => {
       while (next < events.length && events[next].time < until) {
         const e = events[next++];
-        const v = e.inst.play(ctx, e.strip.bus, e.n.pitch, e.time, e.dur, e.n.velocity, e.strip.state);
+        const v = e.inst.play(ctx, e.strip.bus, e.n.pitch, e.time, e.dur, e.n.velocity, e.strip.state, e.n.tune || 0);
         if (v) voices.push(v);
+        if (isKick(e.track, e.n.pitch)) duckStrips(strips, e.time);
       }
     };
 
@@ -1282,7 +1668,7 @@
     LOOKAHEAD, TICK_MS,
     renderProject, encodeWav,
     midiToFreq, adsr, Voice, getNoiseBuffer,
-    Instruments, defineInstrument, getInstrument, DRUM_ROWS, DRUM_INDEX, prepareDrumKit,
+    Instruments, defineInstrument, getInstrument, DRUM_ROWS, DRUM_INDEX, KITS, prepareDrumKit,
     buildMaster, createStrip, applyStrip, isAudible,
     Engine, Transport,
   });

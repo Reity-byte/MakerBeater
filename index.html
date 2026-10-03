@@ -51,7 +51,11 @@
         <select id="selStep">
           <option value="1">1/4</option>
           <option value="2">1/8</option>
+          <option value="3">1/8 T</option>
           <option value="4">1/16</option>
+          <option value="6">1/16 T</option>
+          <option value="8">1/32</option>
+          <option value="16">1/64</option>
         </select>
       </label>
     </div>
@@ -128,6 +132,8 @@
           <hr>
           <button data-action="new">Nový prázdný projekt</button>
           <button data-action="demo">Načíst ukázkovou skladbu</button>
+          <button data-action="house">Šablona: House starter pack</button>
+          <button data-action="breakcore">Šablona: Breakcore</button>
           <hr>
           <button data-action="import">Importovat JSON…</button>
           <button data-action="export-json">Exportovat JSON</button>
@@ -166,6 +172,9 @@
   <footer class="statusbar">
     <span id="statusHint"></span>
     <span class="status-right">
+      <label class="velocity" id="tuneBox" hidden title="Ladění vybraných úderů bicích v půltónech (dvojklik = 0)">
+        Ladění <input type="range" id="inpTune" min="-24" max="24" step="1"> <output id="tuneOut"></output>
+      </label>
       <label class="velocity" id="velocityBox" hidden title="Síla úhozu vybraných not">
         Síla <input type="range" id="inpVelocity" min="0.05" max="1" step="0.01"> <output id="velocityOut"></output>
       </label>
@@ -210,6 +219,7 @@
           <dt>↑ ↓</dt><dd>o půltón (se zapnutým přichytáváním o stupeň stupnice), Shift = oktáva</dd>
           <dt>← →</dt><dd>o krok mřížky, Shift = o takt</dd>
           <dt>Q</dt><dd>kvantizovat: srovnat do mřížky a do stupnice</dd>
+          <dt>R</dt><dd>rozsekat výběr na kroky mřížky (rychlé rolly – např. s krokem 1/32)</dd>
           <dt>D · V · E</dt><dd>kreslení · výběr · guma</dd>
           <dt>S · L · F · G</dt><dd>přichytávání · smyčka · sledování · duchové</dd>
           <dt>+ / −</dt><dd>vodorovný zoom</dd>
@@ -222,6 +232,8 @@
           <dt>Klávesy vlevo</dt><dd>klik = zahraje tón, tažením glissando</dd>
           <dt>Pravítko</dt><dd>klik = skok · tah = oblast smyčky · dvojklik = celá skladba</dd>
           <dt>Stopa</dt><dd>dvojklik na jméno = přejmenovat · dvojklik na posuvník = výchozí hodnota</dd>
+          <dt>Sidechain</dt><dd>stopa se při každém kopáku na chvíli ztiší („pumpování“ jako v house)</dd>
+          <dt>Ladění</dt><dd>u bicích: vyber údery a posuvníkem dole je přelaď (breakcore rolly)</dd>
           <dt>Dotyk</dt><dd>ťuk = nota · tah = posun · dva prsty = zoom · mazání gumou</dd>
           <dt>Ukládání</dt><dd>automaticky do prohlížeče; na přenos použij Projekt → Exportovat JSON</dd>
         </dl>

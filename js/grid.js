@@ -250,6 +250,12 @@
     return best;
   }
 
+  /** Přidá notě ladění (jen když je nenulové – v JSON pak nezabírá místo). */
+  function withTune(n, tune) {
+    if (tune) n.tune = tune;
+    return n;
+  }
+
   function removeNotes(ids) {
     const t = track();
     const del = new Set(ids);
@@ -1182,6 +1188,9 @@
     if (!isDrums() && b.w > 30 && b.h >= 12) {
       c.fillStyle = 'rgba(8, 10, 14, 0.85)';
       c.fillText(MB.noteName(n.pitch), b.x + 5, b.y + b.h / 2 + 0.5);
+    } else if (isDrums() && n.tune && b.w > 16 && b.h >= 12) { // ladění úderu: +3, −5…
+      c.fillStyle = 'rgba(8, 10, 14, 0.85)';
+      c.fillText(n.tune > 0 ? `+${n.tune}` : `−${-n.tune}`, b.x + 3, b.y + b.h / 2 + 0.5);
     }
   }
 
@@ -1391,7 +1400,7 @@
     const t0 = Math.min(...notes.map((n) => n.start));
     clipboard = {
       kind: G.kind,
-      notes: notes.map((n) => ({ pitch: n.pitch, start: n.start - t0, length: n.length, velocity: n.velocity })),
+      notes: notes.map((n) => ({ pitch: n.pitch, start: n.start - t0, length: n.length, velocity: n.velocity, tune: n.tune || 0 })),
     };
     try { localStorage.setItem(CLIPBOARD_KEY, JSON.stringify(clipboard)); } catch (err) { /* nevadí */ }
     return true;
@@ -1431,7 +1440,7 @@
     const songEnd = MB.songTicks(p);
     const [lo, hi] = pitchRange();
     const notes = clip.notes
-      .map((n) => MB.createNote(n.pitch, at + n.start, n.length, n.velocity))
+      .map((n) => withTune(MB.createNote(n.pitch, at + n.start, n.length, n.velocity), n.tune))
       .filter((n) => n.start < songEnd && n.pitch >= lo && n.pitch <= hi);
     if (!notes.length) return 'Vložené noty by byly mimo skladbu.';
     State.change(() => { track().notes.push(...notes); });
@@ -1449,7 +1458,7 @@
     const end = Math.max(...notes.map((n) => n.start + n.length));
     const span = Math.ceil((end - start) / stepT) * stepT;
     const copies = notes
-      .map((n) => MB.createNote(n.pitch, n.start + span, n.length, n.velocity))
+      .map((n) => withTune(MB.createNote(n.pitch, n.start + span, n.length, n.velocity), n.tune))
       .filter((n) => n.start < MB.songTicks(p));
     if (!copies.length) return false;
     State.change(() => { track().notes.push(...copies); });
@@ -1480,6 +1489,36 @@
       }
     });
     return changed;
+  }
+
+  /** R: rozseká vybrané noty na kroky mřížky (např. virbl na rychlý roll). */
+  function chopSelection() {
+    const notes = selectedNotes();
+    if (!notes.length) return 0;
+    const step = MB.stepTicks(State.project);
+    const chopped = MB.chopNotes(notes, step);
+    if (chopped.length === notes.length) return 0; // nic nebylo dost dlouhé
+    const old = new Set(notes.map((n) => n.id));
+    State.change(() => {
+      const t = track();
+      t.notes = t.notes.filter((n) => !old.has(n.id)).concat(chopped);
+    });
+    setSelection(chopped.map((n) => n.id));
+    return chopped.length;
+  }
+
+  /** Ladění vybraných úderů bicích v půltónech (−24 až +24). */
+  function setSelectionTune(st) {
+    if (!isDrums()) return;
+    const notes = selectedNotes();
+    if (!notes.length) return;
+    State.beginGesture();
+    const v = clamp(Math.round(st), -24, 24);
+    for (const n of notes) {
+      if (v) n.tune = v;
+      else delete n.tune;
+    }
+    State.changed('notes');
   }
 
   /** Síla úhozu vybraných not (0–1). Během tažení posuvníkem jeden krok historie. */
@@ -1564,6 +1603,8 @@
     deleteSelection, transposeSelection, moveSelectionTime, selectAll,
     clearSelection, selectedNotes, setSelection,
     copySelection, cutSelection, paste, duplicateSelection, quantize, setSelectionVelocity,
+    chopSelection, setSelectionTune,
+    get isDrums() { return isDrums(); },
     get beatW() { return G.beatW; },
     get rowHeight() { return G.rowHeight; },
     get dragging() { return !!G.drag; },

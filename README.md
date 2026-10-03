@@ -45,11 +45,17 @@ Funguje v aktuálním Chrome, Edge, Firefoxu i Safari. Nejlíp v Chrome/Edge (ne
 - **Zvýraznění:** černé klávesy, tóny mimo stupnici (tmavší), základní tón stupnice (fialový), čáry po krocích,
   dobách a silnější po taktech. Noty ostatních stop jsou vidět jako průhlední „duchové“.
 - **Stopy:** libovolný počet, každá má nástroj, hlasitost, panoramu, dozvuk, Mute, Solo, barvu a jméno.
-- **Nástroje:** klavír, bas, lead, pad, pluck, kytara (Karplus-Strong), varhany, zvonky (FM) a bicí
-  (kick, snare, clap, rimshot, 3 tomy, hi-hat zavřený a otevřený, ride, crash, cowbell).
+- **Nástroje:** klavír (model struny), elektrické piano (Rhodes), house piano (90s „M1“), lo-fi piano, supersaw,
+  bas, lead, pad, pluck, kytara (Karplus-Strong), varhany a zvonky (FM).
+- **Bicí:** tři sady se stejnými řádky (jdou přepínat bez ztráty not): **808**, **909 (house)** a **breakbeat**
+  (zvuk starého sampleru pro jungle a breakcore). Řádky: kick, snare, clap, rimshot, 3 tomy, hi-hat zavřený
+  a otevřený, ride, crash, cowbell, shaker. Každý úder jde **přeladit** (−24 až +24 půltónů).
+- **Efekty u stopy:** dozvuk, **sidechain** („pumpování“ do kopáku jako v house) a **zkreslení**.
+- **Šablony:** *House starter pack* (125 BPM, 909, sidechain) a *Breakcore* (172 BPM, rozsekaný amen rytmus).
 - **Přehrávání:** Play/Pauza/Stop, smyčka (oblast se nastaví tažením v pravítku), sledování kurzoru, změna tempa za běhu.
 - **Hudební pomocníci:** stupnice (dur, moll, harmonická moll, pentatoniky, blues, dórská, chromatická),
-  přichytávání ke stupnici, kvantizace (Q), takt 2/4 až 7/4, mřížka 1/4, 1/8, 1/16.
+  přichytávání ke stupnici, kvantizace (Q), takt 2/4 až 7/4, mřížka 1/4 až 1/64 včetně triol,
+  rozsekání not na rychlé rolly (R).
 - **Editace:** výběr obdélníkem, Ctrl+C/X/V, Ctrl+D, šipky (půltón nebo stupeň stupnice, Shift = oktáva/takt),
   síla úhozu vybraných not, Ctrl+Z / Ctrl+Y.
 - **Ukládání:** automaticky do `localStorage`, export a import JSON (i přetažením souboru do okna),
@@ -167,8 +173,10 @@ Pravidla pro funkci `play`:
 - Hlasitost: jedna nota se silou 0,8 by měla mít špičku zhruba −6 až −10 dBFS. Test „Nástroje: každý zní…“
   v `tests/test.html` zkontroluje, že nový nástroj nemá NaN ani přebuzení.
 
-**Nový bicí zvuk:** přidej řádek do `DRUM_ROWS`, funkci syntézy do `DRUM_SYNTH` a délku a hlasitost do
-`DRUM_LENGTH` a `DRUM_LEVEL`. Bicí se při startu jednou vyrenderují do bufferů (kvůli výkonu) a pak se jen přehrávají.
+**Nový bicí zvuk:** přidej řádek na konec `DRUM_ROWS`, funkci syntézy do `SYNTH_808` (ostatní sady ji zdědí,
+nebo si ji přepíšou ve `SYNTH_909` / `SYNTH_BREAK`) a délku a hlasitost do `length` a `level` sad v `KITS`.
+**Nová bicí sada** = nová položka v `KITS`. Bicí se při startu jednou vyrenderují do bufferů (kvůli výkonu)
+a pak se jen přehrávají.
 
 **Nová stupnice:** přidej položku do `SCALES` v `js/state.js`, např. `mixolydian: { name: 'Mixolydická', steps: [0, 2, 4, 5, 7, 9, 10] }`.
 

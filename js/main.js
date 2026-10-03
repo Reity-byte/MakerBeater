@@ -269,6 +269,14 @@
       case 'demo':
         openProject(MB.createDemoProject());
         break;
+      case 'house':
+        openProject(MB.createHouseProject());
+        toast('House starter pack: 125 BPM, bicí 909, sidechain na basu, piano a pad. Ctrl+Z vrátí předchozí projekt.', { type: 'ok', timeout: 6000 });
+        break;
+      case 'breakcore':
+        openProject(MB.createBreakcoreProject());
+        toast('Breakcore: 172 BPM, rozsekaný amen rytmus a rolly virblu. Zkus vybrat údery a klávesu R nebo posuvník Ladění.', { type: 'ok', timeout: 7000 });
+        break;
       case 'import':
         $('fileImport').click();
         break;
@@ -484,6 +492,8 @@
       <label class="slider-row" title="Dvojklik = výchozí hodnota"><span>Hlasitost</span><input type="range" class="t-vol" min="0" max="1" step="0.01"><output></output></label>
       <label class="slider-row" title="Dvojklik = střed"><span>Panorama</span><input type="range" class="t-pan" min="-1" max="1" step="0.01"><output></output></label>
       <label class="slider-row" title="Dvojklik = výchozí hodnota"><span>Dozvuk</span><input type="range" class="t-rev" min="0" max="1" step="0.01"><output></output></label>
+      <label class="slider-row" title="Ztlumení při každém kopáku – „pumpování“ jako v house (dvojklik = vypnout)"><span>Sidechain</span><input type="range" class="t-sc" min="0" max="1" step="0.01"><output></output></label>
+      <label class="slider-row" title="Zkreslení – špinavější, agresivnější zvuk (dvojklik = vypnout)"><span>Zkreslení</span><input type="range" class="t-drv" min="0" max="1" step="0.01"><output></output></label>
       <div class="track-actions">
         <button class="tbtn wide t-dup" title="Duplikovat stopu i s notami">Duplikovat</button>
         <button class="tbtn wide t-del" title="Smazat stopu">Smazat</button>
@@ -529,6 +539,8 @@
     setSlider(el.querySelector('.t-vol'), t.volume, String(Math.round(t.volume * 100)));
     setSlider(el.querySelector('.t-pan'), t.pan, fmtPan(t.pan));
     setSlider(el.querySelector('.t-rev'), t.reverb, String(Math.round(t.reverb * 100)));
+    setSlider(el.querySelector('.t-sc'), t.sidechain || 0, String(Math.round((t.sidechain || 0) * 100)));
+    setSlider(el.querySelector('.t-drv'), t.drive || 0, String(Math.round((t.drive || 0) * 100)));
     el.querySelector('.t-del').disabled = State.project.tracks.length <= 1;
   }
 
@@ -618,6 +630,8 @@
     if (el.matches('.t-vol')) t.volume = v;
     else if (el.matches('.t-pan')) t.pan = Math.abs(v) < 0.04 ? 0 : v; // přichycení na střed
     else if (el.matches('.t-rev')) t.reverb = v;
+    else if (el.matches('.t-sc')) t.sidechain = v;
+    else if (el.matches('.t-drv')) t.drive = v;
     State.changed('mixer');
   });
 
@@ -637,6 +651,8 @@
       State.change(() => {
         if (e.target.matches('.t-vol')) t.volume = def.volume;
         else if (e.target.matches('.t-pan')) t.pan = 0;
+        else if (e.target.matches('.t-sc')) t.sidechain = 0;
+        else if (e.target.matches('.t-drv')) t.drive = 0;
         else t.reverb = def.reverb;
       }, 'mixer');
       return;
@@ -744,6 +760,8 @@
 
   const velocityBox = $('velocityBox');
   const velocityInput = $('inpVelocity');
+  const tuneBox = $('tuneBox');
+  const tuneInput = $('inpTune');
 
   function updateStatus() {
     $('statusHint').innerHTML = HINTS[State.ui.tool];
@@ -756,15 +774,26 @@
       const avg = sel.reduce((a, x) => a + x.velocity, 0) / n;
       if (document.activeElement !== velocityInput) velocityInput.value = avg;
       $('velocityOut').textContent = Math.round(avg * 100);
+      const tune = Math.round(sel.reduce((a, x) => a + (x.tune || 0), 0) / n);
+      if (document.activeElement !== tuneInput) tuneInput.value = tune;
+      $('tuneOut').textContent = tune > 0 ? `+${tune}` : String(tune);
     } else {
       info.textContent = `${t.name}: `;
       info.insertAdjacentHTML('beforeend', `<b>${t.notes.length}</b> not`);
     }
     velocityBox.hidden = !sel.length;
+    tuneBox.hidden = !sel.length || !Grid.isDrums;
   }
 
   velocityInput.addEventListener('input', () => Grid.setSelectionVelocity(+velocityInput.value));
   velocityInput.addEventListener('change', () => State.endGesture('notes'));
+
+  tuneInput.addEventListener('input', () => Grid.setSelectionTune(+tuneInput.value));
+  tuneInput.addEventListener('change', () => State.endGesture('notes'));
+  tuneInput.addEventListener('dblclick', () => {
+    Grid.setSelectionTune(0);
+    State.endGesture('notes');
+  });
 
   // ---------------------------------------------------------------------------
   // Klávesové zkratky
@@ -837,6 +866,9 @@
     } else if (key === 'q') {
       const n = Grid.quantize();
       toast(n ? `Kvantizováno: ${n} ${n === 1 ? 'nota' : n < 5 ? 'noty' : 'not'}` : 'Noty už jsou v mřížce i ve stupnici.');
+    } else if (key === 'r') {
+      const n = Grid.chopSelection();
+      toast(n ? `Rozsekáno na ${n} not po ${$('selStep').selectedOptions[0].textContent}.` : 'Vyber noty delší než jeden krok mřížky (krok nastavíš v liště, např. 1/32).');
     } else if (key === 'l') {
       toggleLoop();
     } else if (key === 'f') {

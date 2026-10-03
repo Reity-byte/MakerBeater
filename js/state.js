@@ -144,6 +144,8 @@
       volume: def.volume != null ? def.volume : 0.8,
       pan: 0,
       reverb: def.reverb != null ? def.reverb : 0.15,
+      sidechain: 0, // 0–1: jak moc se stopa „ztiší“ při kopáku
+      drive: 0,     // 0–1: zkreslení
       mute: false,
       solo: false,
       notes: [],
@@ -172,6 +174,30 @@
     const p = createProject();
     p.tracks.push(createTrack('drums'), createTrack('piano'));
     return p;
+  }
+
+  /** Možné velikosti kroku mřížky: počet kroků na dobu (3 a 6 = trioly). */
+  const STEP_OPTIONS = [1, 2, 3, 4, 6, 8, 16];
+
+  /**
+   * Rozseká noty na kousky délky `step` (např. virbl na rychlý roll).
+   * Noty kratší než dva kroky nechá být. Vrací nový seznam not.
+   */
+  function chopNotes(notes, step) {
+    const out = [];
+    for (const n of notes) {
+      const pieces = Math.floor(n.length / step);
+      if (pieces < 2) {
+        out.push(n);
+        continue;
+      }
+      for (let i = 0; i < pieces; i++) {
+        const piece = createNote(n.pitch, n.start + i * step, step, n.velocity);
+        if (n.tune) piece.tune = n.tune;
+        out.push(piece);
+      }
+    }
+    return out;
   }
 
   /** Kopie stopy s novými id (stopy i not). */
@@ -257,6 +283,125 @@
     return p;
   }
 
+  /**
+   * House starter pack: 125 BPM, A moll (jako klasický UK house), bicí 909,
+   * basa na doby „mezi“, akordy na house piano a pad, který „pumpuje“ se sidechainem.
+   */
+  function createHouseProject() {
+    const p = createProject({ name: 'House – starter pack', bpm: 125, bars: 8, scale: { root: 9, type: 'minor' } });
+    const S = PPQ / 4;
+    const BAR = 16;
+    const add = (t, step, len, pitch, vel = 0.8, tune = 0) => {
+      const n = createNote(pitch, step * S, len * S, vel);
+      if (tune) n.tune = tune;
+      t.notes.push(n);
+    };
+    // Am7 – Dm7 – Fmaj7 – Em7
+    const chords = [[57, 60, 64, 67], [57, 60, 62, 65], [57, 60, 64, 65], [55, 59, 62, 64]];
+    const roots = [45, 38, 41, 40];
+
+    const drums = createTrack('drums909', { name: 'Bicí 909' });
+    const D = MB.DRUM_INDEX;
+    for (let bar = 0; bar < 8; bar++) {
+      const o = bar * BAR;
+      const fill = bar === 7;
+      for (const s of [0, 4, 8, 12]) add(drums, o + s, 1, D.kick, 0.95);                 // „four on the floor“
+      add(drums, o + 4, 1, D.clap, 0.8);
+      if (!fill) add(drums, o + 12, 1, D.clap, 0.8);
+      for (const s of [2, 6, 10, 14]) add(drums, o + s, 1, D.hatOpen, 0.6);               // otevřený hi-hat mezi dobami
+      for (let s = 1; s < 16; s += 2) add(drums, o + s, 1, D.hatClosed, 0.3);            // tiché šestnáctiny
+      if (bar >= 4) for (let s = 0; s < 16; s++) add(drums, o + s, 1, D.shaker, s % 2 ? 0.35 : 0.55);
+      if (fill) for (const s of [12, 13, 14, 15]) add(drums, o + s, 1, D.snare, 0.5 + (s - 12) * 0.15);
+    }
+    add(drums, 0, 1, D.crash, 0.8);
+    add(drums, 4 * BAR, 1, D.crash, 0.8);
+
+    const bass = createTrack('bass', { sidechain: 0.5 });
+    const groove = [[2, 2, 0], [6, 2, 0], [10, 2, 0], [13, 1, 12], [14, 2, 0]];
+    for (let bar = 0; bar < 8; bar++) {
+      for (const [s, len, iv] of groove) add(bass, bar * BAR + s, len, roots[bar % 4] + iv, 0.85);
+    }
+
+    const piano = createTrack('housepiano', { name: 'Piano stabs', sidechain: 0.4 });
+    const rhythm = [[0, 2], [3, 1], [6, 2], [10, 2], [13, 2]];
+    for (let bar = 0; bar < 8; bar++) {
+      for (const [s, len] of rhythm) for (const pitch of chords[bar % 4]) add(piano, bar * BAR + s, len, pitch, 0.8);
+    }
+
+    const pad = createTrack('pad', { name: 'Akordy', volume: 0.6, sidechain: 0.85 });
+    for (let bar = 0; bar < 8; bar++) for (const pitch of chords[bar % 4]) add(pad, bar * BAR, BAR, pitch + 12, 0.6);
+
+    p.tracks.push(drums, bass, piano, pad);
+    return p;
+  }
+
+  /**
+   * Breakcore: 172 BPM, D moll. Rozsekaný „amen“ rytmus na breakbeat bicích,
+   * rolly virblu po 1/32 s laděním nahoru, sub basa, pad a lo-fi piano.
+   */
+  function createBreakcoreProject() {
+    const p = createProject({ name: 'Breakcore – amen chop', bpm: 172, bars: 8, scale: { root: 2, type: 'minor' } });
+    const S = PPQ / 4;
+    const BAR = 16;
+    const add = (t, tick, len, pitch, vel = 0.8, tune = 0) => {
+      const n = createNote(pitch, tick, len, vel);
+      if (tune) n.tune = tune;
+      t.notes.push(n);
+    };
+    const D = MB.DRUM_INDEX;
+    const drums = createTrack('drumsBreak', { name: 'Break', drive: 0.25 });
+    const A = { kick: [0, 2, 10, 11], snare: [4, 7, 9, 12, 15] };        // klasický „amen“ takt
+    const B = { kick: [0, 2, 10], snare: [4, 7, 9, 14] };
+    const C = { kick: [2, 3, 10], snare: [4, 7, 12, 15] };
+    const bars = [A, A, B, 'rollA', A, C, B, 'rollB'];
+    const roll = (o, from, to, startTune, endTune) => { // virbl po 1/32 se zvyšujícím laděním a sílou
+      const n = (to - from) * 2;
+      for (let i = 0; i < n; i++) {
+        const k = i / Math.max(1, n - 1);
+        add(drums, (o + from) * S + i * (S / 2), S / 2, D.snare, 0.45 + 0.5 * k, Math.round(startTune + (endTune - startTune) * k));
+      }
+    };
+    bars.forEach((pat, bar) => {
+      const o = bar * BAR;
+      const pattern = typeof pat === 'string' ? A : pat;
+      const half = typeof pat === 'string' ? 8 : 16; // u rollu jen první půlka taktu
+      for (const s of pattern.kick) if (s < half) add(drums, (o + s) * S, S, D.kick, 0.95);
+      for (const s of pattern.snare) if (s < half) add(drums, (o + s) * S, S, D.snare, 0.85);
+      for (let s = 0; s < half; s += 2) add(drums, (o + s) * S, S, D.hatClosed, s % 4 ? 0.4 : 0.6);
+      if (bar === 4) for (const s of [3, 13]) add(drums, (o + s) * S, S, D.snare, 0.3); // tiché „ghost“ údery
+      if (pat === 'rollA') roll(o, 8, 16, 0, 12);
+      if (pat === 'rollB') {
+        roll(o, 8, 14, -5, 7);
+        for (let i = 0; i < 8; i++) add(drums, (o + 6) * S + i * (S / 4), S / 4, D.hatClosed, 0.5); // „glitch“ po 1/64
+        add(drums, (o + 14) * S, S, D.kick, 1);
+        add(drums, (o + 15) * S, S, D.kick, 1, -3);
+      }
+    });
+    add(drums, 0, S, D.crash, 0.8);
+    add(drums, 4 * BAR * S, S, D.crash, 0.8);
+
+    // Dm – B♭ – F – C
+    const chords = [[62, 65, 69], [58, 62, 65], [60, 65, 69], [60, 64, 67]];
+    const roots = [38, 34, 41, 36];
+    const bass = createTrack('bass', { name: 'Sub bas', drive: 0.15 });
+    for (let bar = 0; bar < 8; bar++) {
+      add(bass, bar * BAR * S, 6 * S, roots[bar % 4], 0.9);
+      add(bass, (bar * BAR + 6) * S, 2 * S, roots[bar % 4], 0.7);
+      add(bass, (bar * BAR + 10) * S, 6 * S, roots[bar % 4] + (bar % 2 ? 12 : 0), 0.8);
+    }
+    const pad = createTrack('pad', { name: 'Akordy', volume: 0.65 });
+    for (let bar = 0; bar < 8; bar++) for (const pitch of chords[bar % 4]) add(pad, bar * BAR * S, BAR * S, pitch, 0.6);
+
+    const keys = createTrack('lofipiano', { name: 'Lo-fi piano' });
+    for (let bar = 0; bar < 8; bar++) {
+      const c = chords[bar % 4].map((x) => x + 12);
+      [0, 1, 2, 1, 2, 0, 1, 2].forEach((k, i) => add(keys, (bar * BAR + i * 2) * S, 2 * S, c[k], i % 2 ? 0.5 : 0.7));
+    }
+
+    p.tracks.push(drums, bass, pad, keys);
+    return p;
+  }
+
   // ---------------------------------------------------------------------------
   // Kontrola načtených dat (localStorage i import JSON)
   // ---------------------------------------------------------------------------
@@ -277,7 +422,7 @@
     p.bpm = int(raw.bpm, 30, 300, 120);
     p.bars = int(raw.bars, 1, 128, 8);
     p.beatsPerBar = int(raw.beatsPerBar, 2, 7, 4);
-    p.stepsPerBeat = [1, 2, 4].includes(raw.stepsPerBeat) ? raw.stepsPerBeat : 4;
+    p.stepsPerBeat = STEP_OPTIONS.includes(raw.stepsPerBeat) ? raw.stepsPerBeat : 4;
     const sc = raw.scale && typeof raw.scale === 'object' ? raw.scale : {};
     p.scale = { root: int(sc.root, 0, 11, 0), type: SCALES[sc.type] ? sc.type : 'chromatic' };
     p.snapToScale = !!raw.snapToScale;
@@ -298,6 +443,8 @@
       t.volume = num(rt.volume, 0, 1, t.volume);
       t.pan = num(rt.pan, -1, 1, 0);
       t.reverb = num(rt.reverb, 0, 1, t.reverb);
+      t.sidechain = num(rt.sidechain, 0, 1, 0);
+      t.drive = num(rt.drive, 0, 1, 0);
       t.mute = !!rt.mute;
       t.solo = !!rt.solo;
 
@@ -318,6 +465,8 @@
         }
         const n = createNote(pitch, start, Math.min(length, 128 * 7 * PPQ), num(rn.velocity, 0.05, 1, 0.8));
         if (typeof rn.id === 'string' && rn.id && !noteIds.has(rn.id)) n.id = rn.id.slice(0, 32);
+        const tune = drums ? int(rn.tune, -24, 24, 0) : 0; // ladění úderu bicích v půltónech
+        if (tune) n.tune = tune;
         noteIds.add(n.id);
         t.notes.push(n);
       }
@@ -598,7 +747,8 @@
     clamp, uid, pitchClass, noteName, isBlackKey,
     songTicks, stepTicks, barTicks, secPerTick, loopRange,
     scaleSteps, inScale, isRoot, scaleActive, snapActive, snapToScale, scaleIndex, scaleIndexToPitch, transposeInScale,
-    createNote, createTrack, createProject, createEmptyProject, createDemoProject, cloneTrack, uniqueTrackName,
+    createNote, createTrack, createProject, createEmptyProject, createDemoProject, createHouseProject,
+    createBreakcoreProject, cloneTrack, uniqueTrackName, chopNotes, STEP_OPTIONS,
     normalizeProject,
     State,
   });

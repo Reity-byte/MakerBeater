@@ -194,8 +194,8 @@
 
   test('Offline render: nástup noty přesně na vzorek', async () => {
     const sr = 44100;
-    const ctx = new OfflineAudioContext(1, sr * 3, sr);
-    const times = [0.1, 0.60031, 1.1, 1.60017, 2.1, 2.55553];
+    const ctx = new OfflineAudioContext(1, sr * 6, sr);
+    const times = [0.1, 1.10031, 2.1, 3.10017, 4.1, 5.05553]; // po 1 s – klavír doznívá
     for (const t of times) MB.Instruments.piano.play(ctx, ctx.destination, 60, t, 0.05, 0.8, {});
     const buf = await ctx.startRendering();
     const d = buf.getChannelData(0);
@@ -284,7 +284,7 @@
 
   test('Import: vadná data se opraví nebo zahodí, nic nespadne', () => {
     const raw = {
-      name: '   ', bpm: 9999, bars: -3, beatsPerBar: 'x', stepsPerBeat: 3,
+      name: '   ', bpm: 9999, bars: -3, beatsPerBar: 'x', stepsPerBeat: 5,
       scale: { root: 15, type: 'neexistuje' }, loopStart: -100, loopEnd: 1e9,
       tracks: [
         null,
@@ -395,6 +395,82 @@
     const seconds = (wav.size - 44) / 4 / 44100;
     assert(seconds > 4 && seconds < 8, `délka ${seconds.toFixed(2)} s`);
     return `WAV ${seconds.toFixed(2)} s, 44,1 kHz, 16 bit stereo, špička ${dB(peak).toFixed(1)} dBFS, průběh do ${(progress * 100).toFixed(0)} %`;
+  });
+
+  test('Sidechain: pad se při kopáku ztiší a pak vrátí', async () => {
+    const energyAround = (buf, from, to) => {
+      const d = buf.getChannelData(0);
+      let s = 0;
+      for (let i = Math.floor(from * 44100); i < Math.floor(to * 44100); i++) s += d[i] * d[i];
+      return s;
+    };
+    const make = (sidechain) => {
+      const p = MB.createProject({ bpm: 120, bars: 1 });
+      const pad = MB.createTrack('organ', { sidechain, reverb: 0 });
+      pad.notes.push(MB.createNote(60, 0, 4 * PPQ, 0.8));
+      const kick = MB.createTrack('drums', { reverb: 0, volume: 0 }); // kopák spouští sidechain, ale není slyšet
+      kick.notes.push(MB.createNote(MB.DRUM_INDEX.kick, 2 * PPQ, PPQ / 4, 1));
+      p.tracks.push(pad, kick);
+      return p;
+    };
+    const kickTime = 0.02 + 1; // 2. doba při 120 BPM
+    const off = await MB.renderProject(make(0), { tail: 0.2 });
+    const on = await MB.renderProject(make(1), { tail: 0.2 });
+    const dip = energyAround(on, kickTime + 0.01, kickTime + 0.06) / energyAround(off, kickTime + 0.01, kickTime + 0.06);
+    const back = energyAround(on, kickTime + 0.45, kickTime + 0.55) / energyAround(off, kickTime + 0.45, kickTime + 0.55);
+    assert(dip < 0.1, `po kopáku je pad pořád hlasitý (${(dip * 100).toFixed(0)} % energie)`);
+    assert(back > 0.8, `pad se po kopáku nevrátil (${(back * 100).toFixed(0)} %)`);
+    return `při kopáku ${(dip * 100).toFixed(1)} % energie, za 0,45 s zase ${(back * 100).toFixed(0)} %`;
+  });
+
+  test('Bicí: ladění úderu (+12 = o oktávu výš a 2× kratší)', async () => {
+    await MB.prepareDrumKit(44100);
+    const ringLength = async (tune) => {
+      const { data } = await renderPeak((c, d) => MB.Instruments.drumsBreak.play(c, d, MB.DRUM_INDEX.snare, 0.01, 0.1, 0.9, {}, tune), 1);
+      let last = 0;
+      for (let i = 0; i < data.length; i++) if (Math.abs(data[i]) > 0.001) last = i;
+      return last / 44100;
+    };
+    const normal = await ringLength(0);
+    const up = await ringLength(12);
+    assert(up < normal * 0.65 && up > normal * 0.35, `délka ${normal.toFixed(3)} s → ${up.toFixed(3)} s`);
+    return `virbl zní ${normal.toFixed(2)} s, o oktávu výš ${up.toFixed(2)} s`;
+  });
+
+  test('Rozsekání not (R): čtvrťová nota po 1/32 = 8 not', () => {
+    const n = MB.createNote(MB.DRUM_INDEX.snare, PPQ, PPQ, 0.7);
+    n.tune = 5;
+    const short = MB.createNote(MB.DRUM_INDEX.kick, 0, PPQ / 8, 1);
+    const out = MB.chopNotes([n, short], PPQ / 8);
+    const pieces = out.filter((x) => x.pitch === MB.DRUM_INDEX.snare);
+    assert(pieces.length === 8, `čekal 8 kousků, je ${pieces.length}`);
+    assert(pieces.every((x, i) => x.start === PPQ + i * (PPQ / 8) && x.length === PPQ / 8 && x.tune === 5), 'špatné časy nebo ladění');
+    assert(out.includes(short), 'krátká nota se neměla měnit');
+    return '8 kousků po 12 ticích, ladění i síla zachované, krátká nota beze změny';
+  });
+
+  test('Šablony House a Breakcore: render bez chyb a JSON beze ztráty', async () => {
+    const rows = [];
+    for (const make of [MB.createHouseProject, MB.createBreakcoreProject]) {
+      const p = make();
+      const json = JSON.stringify(p);
+      assert(JSON.stringify(MB.normalizeProject(JSON.parse(json))) === json, `${p.name}: export/import se liší`);
+      const short = JSON.parse(json);
+      short.bars = 2; // na test stačí kousek
+      const buf = await MB.renderProject(short, { tail: 0.5 });
+      let peak = 0;
+      let nan = false;
+      for (let c = 0; c < buf.numberOfChannels; c++) {
+        for (const x of buf.getChannelData(c)) {
+          if (Number.isNaN(x)) nan = true;
+          peak = Math.max(peak, Math.abs(x));
+        }
+      }
+      assert(!nan, `${p.name}: NaN ve výstupu`);
+      assert(peak > 0.1 && peak < 1, `${p.name}: špička ${peak.toFixed(2)}`);
+      rows.push(`${p.name} (${p.bpm} BPM, ${p.tracks.length} stop) špička ${dB(peak).toFixed(1)} dBFS`);
+    }
+    return rows.join(' · ');
   });
 
   // ===========================================================================
