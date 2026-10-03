@@ -1,6 +1,7 @@
 /* MakerBeater – audio.js
  * Web Audio engine: mixážní řetězec, registr nástrojů a přesný scheduler.
- * Všechny zvuky jsou syntetické – žádné stažené samply.
+ * Všechny zvuky jsou syntetické, jen klavíry hrají z nahrávek skutečného křídla
+ * (js/piano-samples.js).
  */
 (function (MB) {
   'use strict';
@@ -145,20 +146,27 @@
   // Master a stopy
   // ===========================================================================
 
-  /** Syntetická impulzní odezva pro dozvuk: šum, který exponenciálně doznívá a tmavne. */
-  function makeImpulse(ctx, seconds = 2.6, decay = 3) {
+  /**
+   * Syntetická impulzní odezva dozvuku: šum s exponenciálním doznívání (RT60), výšky
+   * doznívají rychleji než basy (jako ve skutečné místnosti) a hustota odrazů první
+   * desítky milisekund narůstá. Každá strana má jiný šum = široké stereo.
+   */
+  function makeImpulse(ctx, rt60 = 1.8) {
     const sr = ctx.sampleRate;
-    const len = Math.floor(sr * seconds);
-    const pre = Math.floor(sr * 0.012); // předzpoždění 12 ms
+    const len = Math.floor(sr * rt60 * 1.1); // na konci už je -66 dB
+    const pre = Math.floor(sr * 0.015);      // předzpoždění 15 ms
     const buf = ctx.createBuffer(2, len, sr);
     for (let ch = 0; ch < 2; ch++) {
       const d = buf.getChannelData(ch);
-      let lp = 0;
+      let lp1 = 0;
+      let lp2 = 0;
       for (let i = pre; i < len; i++) {
-        const t = (i - pre) / (len - pre);
-        const k = 0.65 - 0.55 * t; // čím později, tím tmavší (víc filtrovaný) šum
-        lp += k * ((Math.random() * 2 - 1) - lp);
-        d[i] = lp * Math.pow(1 - t, decay);
+        const t = (i - pre) / sr;
+        const fc = 1400 + 4600 * Math.exp(-t / 0.4); // jas dozvuku: 6 kHz → 1,4 kHz
+        const k = 1 - Math.exp((-2 * Math.PI * fc) / sr);
+        lp1 += k * (Math.random() * 2 - 1 - lp1);
+        lp2 += k * (lp1 - lp2);
+        d[i] = lp2 * Math.exp((-6.9 * t) / rt60) * Math.min(1, t / 0.025);
       }
     }
     return buf;
@@ -341,10 +349,144 @@
   }
 
   // ---------------------------------------------------------------------------
-  // Klavír: model struny. Alikvóty jsou kvůli tuhosti struny lehce „rozladěné“ nahoru
-  // (neharmoničnost), vyšší doznívají rychleji, každý tón mají dvě struny lehce proti
-  // sobě (přirozené vlnění) a doznívání je dvojité – rychlý úder, pak dlouhý dozvuk.
+  // Klavír: nahrávky skutečného křídla (Salamander Grand Piano, js/piano-samples.js).
+  // Soubor má 2,4 MB, proto se načítá až po startu aplikace na pozadí. Dekóduje se
+  // jednou při 44,1 kHz jako originál – AudioBuffer jde přehrát v živém i offline
+  // kontextu, převzorkování na jinou frekvenci udělá prohlížeč sám.
   // ---------------------------------------------------------------------------
+  const PIANO_URL = new URL('piano-samples.js', (document.currentScript && document.currentScript.src) || location.href).href;
+  const PIANO_RATE = 44100;
+  const PIANO_LEVEL = -20; // dB RMS prvních 0,4 s nahrávky C4 po vyrovnání
+  const piano = { samples: null, keys: [], promise: null }; // samples: MIDI → AudioBuffer
+
+  function loadScript(src) {
+    return new Promise((resolve, reject) => {
+      const s = document.createElement('script');
+      s.src = src;
+      s.onload = resolve;
+      s.onerror = () => reject(new Error(`nejde načíst ${src}`));
+      document.head.appendChild(s);
+    });
+  }
+
+  function base64ToBuffer(b64) {
+    const bin = atob(b64);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    return bytes.buffer;
+  }
+
+  /**
+   * Načte a připraví nahrávky klavíru (jen poprvé). Promise se splní vždy –
+   * když se nahrávky nepovedou, hraje dál záložní syntetický klavír.
+   */
+  function preparePiano() {
+    if (!piano.promise) {
+      piano.promise = (MB.PIANO_SAMPLES ? Promise.resolve() : loadScript(PIANO_URL))
+        .then(() => decodePiano(MB.PIANO_SAMPLES))
+        .then((samples) => {
+          piano.samples = samples;
+          piano.keys = [...samples.keys()].sort((a, b) => a - b);
+          delete MB.PIANO_SAMPLES; // base64 už není potřeba – uvolníme paměť
+        })
+        .catch((err) => console.warn('[MB] nahrávky klavíru nejdou načíst, hraje syntetický klavír', err));
+    }
+    return piano.promise;
+  }
+
+  /**
+   * Dekóduje mp3 a srovná je: ořízne ticho před úderem, zkrátí dlouhé doznívání
+   * (šetří paměť) a vyrovná hlasitost i stereo mezi sousedními nahrávkami,
+   * aby melodie neskákala hlasitostí ani ze strany na stranu.
+   */
+  async function decodePiano(data) {
+    if (!data) throw new Error('chybí nahrávky');
+    const OAC = window.OfflineAudioContext || window.webkitOfflineAudioContext;
+    const ctx = new OAC(2, 1, PIANO_RATE);
+    const items = [];
+    // po pěti naráz: rychlé, a v paměti přitom nejsou všechny nezkrácené nahrávky současně
+    const keys = Object.keys(data);
+    for (let i = 0; i < keys.length; i += 5) {
+      const batch = keys.slice(i, i + 5);
+      const decoded = await Promise.all(batch.map((key) => ctx.decodeAudioData(base64ToBuffer(data[key]))));
+      batch.forEach((key, j) => items.push(trimPianoSample(ctx, Number(key), decoded[j])));
+    }
+    return levelPianoSamples(items);
+  }
+
+  /** Ořízne ticho před úderem a dlouhé doznívání, změří hlasitost a vyvážení stran. */
+  function trimPianoSample(ctx, midi, buf) {
+    const sr = buf.sampleRate;
+    const L = buf.getChannelData(0);
+    const R = buf.numberOfChannels > 1 ? buf.getChannelData(1) : L;
+    let peak = 1e-9;
+    for (let i = 0; i < L.length; i++) peak = Math.max(peak, Math.abs(L[i]), Math.abs(R[i]));
+    let start = 0;
+    while (start < L.length && Math.abs(L[start]) < peak * 0.01 && Math.abs(R[start]) < peak * 0.01) start++;
+    start = Math.max(0, start - Math.round(sr * 0.001)); // 1 ms před úderem
+    const keep = clamp(8 - (midi - 24) * 0.07, 3.5, 8);    // s – výšky doznívají rychleji
+    const length = Math.min(L.length - start, Math.round(keep * sr));
+    const out = ctx.createBuffer(2, length, sr);
+    out.getChannelData(0).set(L.subarray(start, start + length));
+    out.getChannelData(1).set(R.subarray(start, start + length));
+    let eL = 1e-12;
+    let eR = 1e-12;
+    const win = Math.min(length, Math.round(sr * 0.4));
+    for (let i = start; i < start + win; i++) {
+      eL += L[i] * L[i];
+      eR += R[i] * R[i];
+    }
+    return {
+      midi, buf: out, eL, eR,
+      level: 10 * Math.log10((eL + eR) / (2 * win)),
+      balance: 10 * Math.log10(eL / eR),
+    };
+  }
+
+  /** Vyrovná hlasitost a stereo nahrávek podle hladké křivky přes celou klaviaturu. */
+  function levelPianoSamples(items) {
+    // hladká křivka hlasitosti přes celou klaviaturu (lineární regrese v dB)
+    const n = items.length;
+    const mx = items.reduce((s, it) => s + it.midi, 0) / n;
+    const my = items.reduce((s, it) => s + it.level, 0) / n;
+    const sxx = items.reduce((s, it) => s + (it.midi - mx) ** 2, 0) || 1;
+    const slope = items.reduce((s, it) => s + (it.midi - mx) * (it.level - my), 0) / sxx;
+
+    const samples = new Map();
+    for (const it of items) {
+      const target = PIANO_LEVEL + 0.5 * slope * (it.midi - 60); // přirozený úbytek do výšek, jen poloviční
+      const gain = clamp(target - it.level, -9, 9);
+      const side = 2.5 - (5 * (it.midi - 24)) / 72;               // basy trochu vlevo, výšky vpravo
+      const tilt = clamp(side - it.balance, -14, 14);
+      const tL = Math.pow(10, tilt / 40);
+      const tR = 1 / tL;
+      // přesun mezi stranami nesmí změnit celkovou hlasitost
+      const g = Math.pow(10, gain / 20) * Math.sqrt((it.eL + it.eR) / (it.eL * tL * tL + it.eR * tR * tR));
+      const gL = g * tL;
+      const gR = g * tR;
+      const len = it.buf.length;
+      const fadeIn = Math.round(it.buf.sampleRate * 0.002);
+      const fadeOut = Math.round(len * 0.35);                     // konec zkrácené nahrávky plynule ztlumíme
+      const oL = it.buf.getChannelData(0);
+      const oR = it.buf.getChannelData(1);
+      for (let i = 0; i < len; i++) {
+        let env = i < fadeIn ? i / fadeIn : 1;
+        if (len - i < fadeOut) env *= ((len - i) / fadeOut) ** 2;
+        oL[i] *= gL * env;
+        oR[i] *= gR * env;
+      }
+      samples.set(it.midi, it.buf);
+    }
+    return samples;
+  }
+
+  // Načítat se začne hned po startu aplikace, ať je klavír připravený dřív, než se hraje.
+  if (document.readyState === 'complete') setTimeout(preparePiano, 0);
+  else window.addEventListener('load', () => preparePiano(), { once: true });
+
+  // Záložní syntetický klavír – zní jen pár vteřin po startu, než se nahrávky načtou
+  // (nebo když se načíst nepovedou). Aditivní model struny: neharmonické alikvóty,
+  // vyšší doznívají rychleji, dvě lehce rozladěné struny a dvojité doznívání.
   function pianoString(sr, pitch) {
     const f0 = midiToFreq(pitch);
     const t60 = clamp(7 - (pitch - 21) * 0.075, 1.2, 7);           // doznění na -60 dB
@@ -353,11 +495,11 @@
     const B = clamp(0.00012 * Math.pow(2, (pitch - 48) / 14), 0.00004, 0.004); // neharmoničnost
     const tauSlow = t60 / 6.9;
     const strike = 1 / 7.3;                                           // místo úderu kladívka
-    const limit = Math.min(sr * 0.45, 12000);
+    const limit = Math.min(sr * 0.45, 9000);
     for (let k = 1; k <= 40; k++) {
       const fk = k * f0 * Math.sqrt(1 + B * k * k);
       if (fk > limit) break;
-      const amp = (Math.abs(Math.sin(Math.PI * k * strike)) + 0.05) / Math.pow(k, 1.05);
+      const amp = (Math.abs(Math.sin(Math.PI * k * strike)) + 0.05) / Math.pow(k, 1.6);
       const tau = tauSlow / (1 + (k - 1) * 0.12 + fk / 3000);
       const len = Math.min(n, Math.ceil(tau * 9.2 * sr));             // dál už je ticho (-80 dB)
       const strings = k <= 8 ? [-0.6, 0.6] : [0];                     // centy rozladění strun
@@ -383,34 +525,53 @@
         }
       }
     }
-    // úder kladívka: krátký tlumený šum
-    let lp = 0;
-    const hammer = Math.floor(sr * 0.02);
-    for (let i = 0; i < hammer; i++) {
-      lp += 0.25 * (Math.random() * 2 - 1 - lp);
-      out[i] += lp * 0.25 * (1 - i / hammer);
-    }
+    // konec bufferu plynule ztlumit (basy by jinak luply uprostřed doznívání)
+    const fade = Math.floor(n * 0.3);
+    for (let i = n - fade; i < n; i++) out[i] *= ((n - i) / fade) ** 2;
     let peak = 1e-9;
     for (let i = 0; i < n; i++) peak = Math.max(peak, Math.abs(out[i]));
     const data = new Float32Array(n);
-    for (let i = 0; i < n; i++) data[i] = (out[i] / peak) * 0.9;
+    for (let i = 0; i < n; i++) data[i] = (out[i] / peak) * 0.35; // zhruba hlasitost nahrávek
     return data;
   }
 
-  const pianoBuffer = (ctx, pitch) => cachedBuffer(ctx, `piano${pitch}`, (sr) => pianoString(sr, pitch));
+  const synthPianoBuffer = (ctx, pitch) => cachedBuffer(ctx, `piano${pitch}`, (sr) => pianoString(sr, pitch));
 
-  /** Společné přehrání struny klavíru: síla úhozu = hlasitost i jas, puštění klávesy = dusítko. */
-  function playPianoString(v, ctx, pitch, time, dur, vel, { level, bright = 1, damp = 0.08 }) {
-    const buf = pianoBuffer(ctx, pitch);
-    const f0 = midiToFreq(pitch);
+  /** Ekvalizér: pásmový / policový filtr se zesílením v dB. */
+  function eq(v, type, freq, gain, q = 0.8) {
+    const f = v.filter(type, freq, q);
+    f.gain.value = gain;
+    return f;
+  }
+
+  /**
+   * Úhoz na klavír: nejbližší nahrávka přeladěná o ±1 půltón. Síla úhozu = hlasitost
+   * i jas (slabý úhoz zní tmavěji), puštění klávesy = dusítko. Nejvyšší struny dusítka
+   * nemají, takže doznívají dál. `filters` = zabarvení (řetěz filtrů před hlasitostí).
+   */
+  function playPiano(v, ctx, pitch, time, dur, vel, { level = 1, filters = [], release = 1 } = {}) {
+    let buf = null;
+    let rate = 1;
+    if (piano.samples) {
+      let base = piano.keys[0];
+      for (const k of piano.keys) if (Math.abs(k - pitch) < Math.abs(base - pitch)) base = k;
+      buf = piano.samples.get(base);
+      rate = Math.pow(2, (pitch - base) / 12);
+    } else {
+      buf = synthPianoBuffer(ctx, pitch);
+    }
     const src = v.buffer(buf);
-    const tone = v.filter('lowpass', Math.min(18000, (f0 * (3 + 25 * vel * vel) + 900) * bright), 0.3);
+    src.playbackRate.value = rate;
+    const tone = v.filter('lowpass', Math.min(20000, 1200 * Math.pow(2, 4.2 * vel)), 0.5);
     const amp = v.gain(0);
-    src.connect(tone).connect(amp).connect(v.out);
-    const end = Math.max(time + dur, time + 0.02);
-    amp.gain.setValueAtTime(level * (0.2 + 0.8 * vel), time);
+    let node = src.connect(tone);
+    for (const f of filters) node = node.connect(f);
+    node.connect(amp).connect(v.out);
+    const end = Math.max(time + dur, time + 0.03);
+    const damp = (pitch >= 89 ? 0.6 : clamp(0.05 + (89 - pitch) * 0.002, 0.05, 0.16)) * release;
+    amp.gain.setValueAtTime(level * Math.pow(clamp(vel, 0.05, 1), 1.4), time);
     amp.gain.setTargetAtTime(0, end, damp);
-    return { src, amp, stop: Math.min(end + damp * 6, time + buf.duration) };
+    return { src, amp, stop: Math.min(end + damp * 7, time + buf.duration / rate) };
   }
 
   defineInstrument('piano', {
@@ -421,7 +582,7 @@
     center: 64,
     play(ctx, dest, pitch, time, dur, vel) {
       const v = new Voice(ctx, dest);
-      const { stop } = playPianoString(v, ctx, pitch, time, dur, vel, { level: 0.75 });
+      const { stop } = playPiano(v, ctx, pitch, time, dur, vel, { level: 1.45 });
       return v.play(time, stop);
     },
   });
@@ -454,15 +615,20 @@
       bodyMod.connect(bodyIdx).connect(body.frequency);
       body.connect(amp);
 
-      const tine = v.osc('sine', f);
-      const tineMod = v.osc('sine', f * 14);
-      const tineIdx = v.gain(0);
-      tineIdx.gain.setValueAtTime(f * 14 * 0.35 * vel, time);
-      tineIdx.gain.setTargetAtTime(0, time, 0.03);
-      tineMod.connect(tineIdx).connect(tine.frequency);
-      const tineAmp = v.gain(0);
-      hit(tineAmp.gain, time, 0.3 * vel, 0.25);
-      tine.connect(tineAmp).connect(amp);
+      // „cink“ má postranní pásma kolem 15× f – u vysokých tónů by přesáhla slyšitelné
+      // pásmo a vrátila se jako falešné tóny (aliasing), proto ho nahoře utlumíme
+      const tineMix = clamp((20000 - f * 15) / 10000, 0, 1);
+      if (tineMix > 0) {
+        const tine = v.osc('sine', f);
+        const tineMod = v.osc('sine', f * 14);
+        const tineIdx = v.gain(0);
+        tineIdx.gain.setValueAtTime(f * 14 * 0.35 * vel * tineMix, time);
+        tineIdx.gain.setTargetAtTime(0, time, 0.03);
+        tineMod.connect(tineIdx).connect(tine.frequency);
+        const tineAmp = v.gain(0);
+        hit(tineAmp.gain, time, 0.3 * vel * tineMix, 0.25);
+        tine.connect(tineAmp).connect(amp);
+      }
 
       const g = amp.gain;
       const peak = 0.42 * (0.3 + 0.7 * vel);
@@ -475,8 +641,8 @@
   });
 
   // ---------------------------------------------------------------------------
-  // House piano: jasná struna + varhanní vrstva – zvuk klavírních akordů z 90s house
-  // (ve stylu Korg M1 „Piano 8'“).
+  // House piano: klavír ztenčený a zjasněný ekvalizérem + varhanní vrstva –
+  // zvuk klavírních akordů z 90s house (ve stylu Korg M1 „Piano 8'“).
   // ---------------------------------------------------------------------------
   defineInstrument('housepiano', {
     name: 'House piano',
@@ -487,19 +653,29 @@
     play(ctx, dest, pitch, time, dur, vel) {
       const v = new Voice(ctx, dest);
       const f = midiToFreq(pitch);
-      const { stop } = playPianoString(v, ctx, pitch, time, dur, vel, { level: 0.6, bright: 1.6, damp: 0.05 });
+      const filters = [v.filter('highpass', 200, 0.7), eq(v, 'peaking', 2600, 5, 0.9), eq(v, 'highshelf', 6500, 4)];
+      const { stop } = playPiano(v, ctx, pitch, time, dur, vel, { level: 1.6, filters, release: 0.6 });
       const organ = v.gain(0);
       for (const [mult, g, det] of [[1, 0.5, 0], [1, 0.3, 7], [2, 0.3, 0], [4, 0.12, 0]]) {
         v.osc('sine', f * mult, det).connect(v.gain(g)).connect(organ);
       }
       organ.connect(v.out);
-      const end = adsr(organ.gain, time, dur, { a: 0.004, d: 0.35, s: 0.35, r: 0.08 }, 0.3 * (0.4 + 0.6 * vel));
+      const end = adsr(organ.gain, time, dur, { a: 0.004, d: 0.35, s: 0.35, r: 0.08 }, 0.12 * (0.4 + 0.6 * vel));
       return v.play(time, Math.max(stop, end));
     },
   });
 
+  /** LFO sinus se zadanou fází (radiány) – oscilátor sám začíná vždy od nuly. */
+  function phasedSine(v, freq, phase) {
+    const o = v.osc('sine', freq);
+    o.setPeriodicWave(v.ctx.createPeriodicWave(
+      new Float32Array([0, Math.sin(phase)]), new Float32Array([0, Math.cos(phase)])));
+    return o;
+  }
+
   // ---------------------------------------------------------------------------
-  // Lo-fi piano: struna klavíru „z kazety“ – kolísání ladění, ztlumené výšky a šum
+  // Lo-fi piano: klavír „z kazety“ – ztlumené výšky a basy, kolísání rychlosti pásku.
+  // Kolísání (wow) jde podle absolutního času, takže ladí všechny tóny akordu stejně.
   // ---------------------------------------------------------------------------
   defineInstrument('lofipiano', {
     name: 'Lo-fi piano',
@@ -509,11 +685,11 @@
     center: 62,
     play(ctx, dest, pitch, time, dur, vel) {
       const v = new Voice(ctx, dest);
-      const { src, amp, stop } = playPianoString(v, ctx, pitch, time, dur, vel, { level: 0.95, bright: 0.45, damp: 0.12 });
-      const wow = v.osc('sine', 0.55 + Math.random() * 0.2);              // pomalé kolísání pásku
-      wow.connect(v.gain(14)).connect(src.detune);
-      const hiss = v.noise();
-      hiss.connect(v.filter('highpass', 3000)).connect(v.gain(0.012)).connect(amp);
+      const filters = [v.filter('highpass', 140, 0.7), v.filter('lowpass', 2800, 1.1)];
+      const { src, stop } = playPiano(v, ctx, pitch, time, dur, vel, { level: 1.75, filters, release: 1.5 });
+      const wow = 0.55;
+      phasedSine(v, wow, 2 * Math.PI * ((wow * time) % 1)).connect(v.gain(12)).connect(src.detune); // ±12 centů
+      phasedSine(v, 6.3, 2 * Math.PI * ((6.3 * time) % 1)).connect(v.gain(3)).connect(src.detune);  // flutter
       return v.play(time, stop);
     },
   });
@@ -1010,20 +1186,20 @@
     snare(v, t, vel) {
       drumTone(v, t, 'triangle', 200, 175, vel * 0.5, 0.06);
       drumTone(v, t, 'sine', 330, 300, vel * 0.25, 0.05);
-      noiseHit(v, t, { type: 'bandpass', freq: 3200, q: 0.7, peak: vel * 0.75, tau: 0.1 }).connect(v.out);
-      noiseHit(v, t, { freq: 6500, peak: vel * 0.3, tau: 0.05 }).connect(v.out);                     // struník
-      noiseHit(v, t, { type: 'lowpass', freq: 4000, peak: vel * 0.15, tau: 0.2, length: 0.6 }).connect(v.out); // místnost
+      noiseHit(v, t, { type: 'bandpass', freq: 3200, q: 0.7, peak: vel * 0.75, tau: 0.08 }).connect(v.out);
+      noiseHit(v, t, { freq: 6500, peak: vel * 0.3, tau: 0.04 }).connect(v.out);                     // struník
     },
     tomLow: (v, t, vel) => tom(v, t, vel, 90, 0.4),
     tomMid: (v, t, vel) => tom(v, t, vel, 130, 0.4),
     tomHigh: (v, t, vel) => tom(v, t, vel, 180, 0.4),
+    // činely víc „kovové“ a méně šumové
     hatClosed(v, t, vel) {
-      noiseHit(v, t, { freq: 7000, peak: vel * 0.5, tau: 0.03 }).connect(v.out);
-      metal(v, t, vel, { tau: 0.025, peak: 0.5, bp: 9000, hp: 6000 }).connect(v.out);
+      metal(v, t, vel, { tau: 0.025, mult: 1.1, peak: 0.9, bp: 8500, hp: 5500 }).connect(v.out);
+      noiseHit(v, t, { type: 'bandpass', freq: 8000, q: 0.9, peak: vel * 0.25, tau: 0.02 }).connect(v.out);
     },
     hatOpen(v, t, vel) {
-      noiseHit(v, t, { freq: 7000, peak: vel * 0.4, tau: 0.22 }).connect(v.out);
-      metal(v, t, vel, { tau: 0.22, peak: 0.5, bp: 9000, hp: 6000 }).connect(v.out);
+      metal(v, t, vel, { tau: 0.2, mult: 1.1, peak: 0.85, bp: 8500, hp: 5500 }).connect(v.out);
+      noiseHit(v, t, { type: 'bandpass', freq: 8000, q: 0.9, peak: vel * 0.2, tau: 0.12 }).connect(v.out);
     },
     ride(v, t, vel) {
       metal(v, t, vel, { tau: 0.9, mult: 1.3, bp: 7000, hp: 4500, peak: 0.9 }).connect(v.out);
@@ -1073,8 +1249,8 @@
       length: Object.assign({}, LEN_808, { kick: 0.5, snare: 0.6, hatClosed: 0.18, hatOpen: 1.1, ride: 2.4 }),
       grit: true,
       level: {
-        kick: 0.85, snare: 0.7, clap: 1.4, rim: 0.7, tomLow: 0.6, tomMid: 0.6, tomHigh: 0.6,
-        hatClosed: 0.45, hatOpen: 0.5, ride: 0.8, crash: 0.65, cowbell: 1.3, shaker: 0.6,
+        kick: 0.85, snare: 0.75, clap: 1.4, rim: 0.7, tomLow: 0.6, tomMid: 0.6, tomHigh: 0.6,
+        hatClosed: 1.15, hatOpen: 1.25, ride: 0.8, crash: 0.85, cowbell: 1.3, shaker: 0.65,
       },
     },
   };
@@ -1109,18 +1285,39 @@
     return Promise.all(kitIds.map((id) => prepareKit(id, sampleRate)));
   }
 
-  /** „Špína“ starého sampleru (SP-1200): 26 kHz, 12 bitů a lehké přebuzení. */
-  function samplerGrit(data, sr) {
-    const step = 26040 / sr;
-    let phase = 1;
-    let held = 0;
+  /** Lowpass 2. řádu (Butterworth) přímo na poli vzorků. */
+  function lowpassInPlace(data, sr, fc) {
+    const w = (2 * Math.PI * fc) / sr;
+    const alpha = Math.sin(w) / (2 * Math.SQRT1_2);
+    const cw = Math.cos(w);
+    const a0 = 1 + alpha;
+    const b0 = (1 - cw) / 2 / a0;
+    const b1 = (1 - cw) / a0;
+    const a1 = (-2 * cw) / a0;
+    const a2 = (1 - alpha) / a0;
+    let x1 = 0;
+    let x2 = 0;
+    let y1 = 0;
+    let y2 = 0;
     for (let i = 0; i < data.length; i++) {
-      phase += step;
-      if (phase >= 1) {
-        phase -= 1;
-        held = Math.tanh(data[i] * 1.5) / Math.tanh(1.5);
-      }
-      data[i] = Math.round(held * 2047) / 2047;
+      const x = data[i];
+      const y = b0 * x + b1 * x1 + b0 * x2 - a1 * y1 - a2 * y2;
+      x2 = x1; x1 = x;
+      y2 = y1; y1 = y;
+      data[i] = y;
+    }
+  }
+
+  /**
+   * „Špína“ starého sampleru (SP-1200): užší pásmo (do 12 kHz), lehké přebuzení
+   * a 12 bitů. (Dřívější napodobení jeho 26 kHz vzorkování dělalo místo „špíny“ šum.)
+   */
+  function samplerGrit(data, sr) {
+    lowpassInPlace(data, sr, Math.min(12000, sr * 0.45));
+    lowpassInPlace(data, sr, Math.min(12000, sr * 0.45));
+    const norm = Math.tanh(1.5);
+    for (let i = 0; i < data.length; i++) {
+      data[i] = Math.round((Math.tanh(data[i] * 1.5) / norm) * 2047) / 2047;
     }
   }
 
@@ -1216,6 +1413,7 @@
         this.ctx.onstatechange = () => MB.emit('audiostate', this.ctx.state);
         MB.emit('audiostate', this.ctx.state);
         prepareDrumKit(this.ctx.sampleRate); // na pozadí; do té doby bicí syntetizujeme živě
+        preparePiano();
       }
       if (this.ctx.state === 'suspended') this.ctx.resume();
       return this.ctx;
@@ -1568,7 +1766,7 @@
    * a doznělé hlasy se odpojí – stejný princip jako živý scheduler.
    */
   async function renderProject(project, { sampleRate = 44100, tail = 3, onProgress, chunk = 0.25 } = {}) {
-    await prepareDrumKit(sampleRate);
+    await Promise.all([prepareDrumKit(sampleRate), preparePiano()]);
     const spt = MB.secPerTick(project);
     const songEnd = MB.songTicks(project);
     const t0 = 0.02;
@@ -1668,7 +1866,8 @@
     LOOKAHEAD, TICK_MS,
     renderProject, encodeWav,
     midiToFreq, adsr, Voice, getNoiseBuffer,
-    Instruments, defineInstrument, getInstrument, DRUM_ROWS, DRUM_INDEX, KITS, prepareDrumKit,
+    Instruments, defineInstrument, getInstrument, DRUM_ROWS, DRUM_INDEX, KITS, prepareDrumKit, preparePiano,
+    isPianoSampled: () => !!piano.samples,
     buildMaster, createStrip, applyStrip, isAudible,
     Engine, Transport,
   });

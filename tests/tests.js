@@ -358,6 +358,34 @@
     return `${rows.length} zvuků v pořádku`;
   });
 
+  test('Klavír: hraje z nahrávek, sousední tóny bez skoků v hlasitosti a stereu', async () => {
+    await MB.preparePiano();
+    assert(MB.isPianoSampled(), 'nahrávky klavíru se nenačetly');
+    const sr = 44100;
+    const levels = [];
+    for (let pitch = MB.PITCH_MIN; pitch <= MB.PITCH_MAX; pitch++) {
+      const ctx = new OfflineAudioContext(2, sr * 0.5, sr);
+      MB.Instruments.piano.play(ctx, ctx.destination, pitch, 0, 0.4, 0.8, {});
+      const b = await ctx.startRendering();
+      const L = b.getChannelData(0);
+      const R = b.getChannelData(1);
+      let eL = 0;
+      let eR = 0;
+      for (let i = 0; i < L.length; i++) { eL += L[i] * L[i]; eR += R[i] * R[i]; }
+      levels.push({ pitch, level: 10 * Math.log10((eL + eR) / (2 * L.length)), side: 10 * Math.log10(eL / eR) });
+    }
+    let jump = 0;
+    let sideJump = 0;
+    for (let i = 1; i < levels.length; i++) {
+      jump = Math.max(jump, Math.abs(levels[i].level - levels[i - 1].level));
+      sideJump = Math.max(sideJump, Math.abs(levels[i].side - levels[i - 1].side));
+    }
+    assert(jump < 3, `skok hlasitosti mezi sousedními tóny ${jump.toFixed(1)} dB`);
+    assert(sideJump < 4, `skok sterea mezi sousedními tóny ${sideJump.toFixed(1)} dB`);
+    const c4 = levels.find((l) => l.pitch === 60).level;
+    return `${levels.length} tónů, největší skok hlasitosti ${jump.toFixed(1)} dB, sterea ${sideJump.toFixed(1)} dB, C4 ${c4.toFixed(1)} dB RMS`;
+  });
+
   test('Bicí: zavřený hi-hat utlumí znějící otevřený (choke)', async () => {
     await MB.prepareDrumKit(44100);
     const D = MB.DRUM_INDEX;
@@ -525,6 +553,7 @@
   async function runAll() {
     const ul = document.getElementById('results');
     ul.innerHTML = '';
+    await MB.preparePiano(); // testy mají hrát nahrávky klavíru, ne záložní syntézu
     const results = [];
     for (const t of tests) {
       const li = document.createElement('li');

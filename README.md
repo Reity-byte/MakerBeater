@@ -1,8 +1,8 @@
 # MakerBeater
 
 Webový hudební editor typu **piano roll / step sequencer** (inspirovaný BeepBoxem, BandLabem a piano rollem z FL Studia).
-Čisté HTML, CSS a JavaScript, bez frameworků, bez build kroku a bez stažených samplů: všechny zvuky se syntetizují
-přes Web Audio API.
+Čisté HTML, CSS a JavaScript, bez frameworků a bez build kroku. Zvuky se syntetizují přes Web Audio API,
+jen klavíry hrají z nahrávek skutečného křídla (viz [Licence nahrávek](#licence-nahrávek)).
 
 ## Spuštění
 
@@ -45,8 +45,8 @@ Funguje v aktuálním Chrome, Edge, Firefoxu i Safari. Nejlíp v Chrome/Edge (ne
 - **Zvýraznění:** černé klávesy, tóny mimo stupnici (tmavší), základní tón stupnice (fialový), čáry po krocích,
   dobách a silnější po taktech. Noty ostatních stop jsou vidět jako průhlední „duchové“.
 - **Stopy:** libovolný počet, každá má nástroj, hlasitost, panoramu, dozvuk, Mute, Solo, barvu a jméno.
-- **Nástroje:** klavír (model struny), elektrické piano (Rhodes), house piano (90s „M1“), lo-fi piano, supersaw,
-  bas, lead, pad, pluck, kytara (Karplus-Strong), varhany a zvonky (FM).
+- **Nástroje:** klavír (nahrávky křídla Yamaha C5), house piano (90s „M1“), lo-fi piano (kazeta),
+  elektrické piano (Rhodes, FM), supersaw, bas, lead, pad, pluck, kytara (Karplus-Strong), varhany a zvonky (FM).
 - **Bicí:** tři sady se stejnými řádky (jdou přepínat bez ztráty not): **808**, **909 (house)** a **breakbeat**
   (zvuk starého sampleru pro jungle a breakcore). Řádky: kick, snare, clap, rimshot, 3 tomy, hi-hat zavřený
   a otevřený, ride, crash, cowbell, shaker. Každý úder jde **přeladit** (−24 až +24 půltónů).
@@ -73,6 +73,7 @@ Nainstalovat aplikaci.cmd   vytvoří zástupce aplikace (spouští app/nainstal
 app/             ikona aplikace a instalační skript zástupců
 js/state.js      datový model, stupnice, undo/redo, localStorage, import/export JSON, sběrnice událostí
 js/audio.js      Web Audio engine: nástroje, mix, scheduler, offline render, WAV, nahrávání
+js/piano-samples.js  nahrávky klavíru (mp3 v base64, 2,4 MB, načítá se až po startu)
 js/grid.js       piano roll: vykreslování na canvas, myš/dotyk, výběr, schránka, zoom
 js/main.js       propojení UI: lišta, seznam stop, projekt, klávesové zkratky, smyčka překreslování
 tests/test.html  automatické testy (otevři a klikni na „Spustit všechny testy“)
@@ -178,6 +179,12 @@ nebo si ji přepíšou ve `SYNTH_909` / `SYNTH_BREAK`) a délku a hlasitost do `
 **Nová bicí sada** = nová položka v `KITS`. Bicí se při startu jednou vyrenderují do bufferů (kvůli výkonu)
 a pak se jen přehrávají.
 
+**Klavír** hraje z nahrávek v `js/piano-samples.js`: 25 tónů po malé tercii (C1–C7), mezilehlé tóny vzniknou
+přeladěním té nejbližší o půltón. Nahrávky jsou v base64 uvnitř skriptu, protože z `file://` jde načíst skript,
+ale ne mp3 přes `fetch`. Po dekódování se srovná hlasitost a stereo sousedních nahrávek (`decodePiano`).
+Další piana nad nimi stačí postavit přes `playPiano(v, ctx, pitch, time, dur, vel, { level, filters })`
+(viz *House piano* a *Lo-fi piano*). Než se nahrávky načtou (pár vteřin po startu), hraje záložní syntetický klavír.
+
 **Nová stupnice:** přidej položku do `SCALES` v `js/state.js`, např. `mixolydian: { name: 'Mixolydická', steps: [0, 2, 4, 5, 7, 9, 10] }`.
 
 ## Testy
@@ -189,7 +196,7 @@ Testy ověří:
 - nástup noty přesně na vzorek,
 - stupnice, undo/redo a kontrolu importu,
 - export a import JSON beze ztráty,
-- hlasitost všech nástrojů, dusení hi-hatu, WAV export,
+- hlasitost všech nástrojů, vyrovnanost nahrávek klavíru, dusení hi-hatu, WAV export,
 - živé přehrávání v AudioContextu.
 
 ## Tipy a omezení
@@ -205,3 +212,10 @@ Testy ověří:
   do WAV pomaleji. Výsledek je stejný.
 - Nahrávání přes MediaRecorder ukládá WebM (Chrome, Firefox) nebo MP4/M4A (Safari) a nahrává i změny hlasitosti master.
   Export do WAV je bezeztrátový a nezávisí na rychlosti počítače.
+
+## Licence nahrávek
+
+Klavír používá **Salamander Grand Piano V3** od Alexandera Holma (nahráno na křídle Yamaha C5),
+licence [CC BY 3.0](https://creativecommons.org/licenses/by/3.0/). Zkrácené mp3 verze pocházejí z projektu
+[Tone.js](https://github.com/Tonejs/audio). Při sdílení aplikace nebo skladeb s tímto klavírem stačí uvést autora.
+Všechny ostatní zvuky jsou syntetické.
