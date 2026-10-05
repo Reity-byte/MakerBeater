@@ -88,6 +88,7 @@
     canvas: $('gridCanvas'),
     scroll: $('gridScroll'),
     spacer: $('gridSpacer'),
+    auto: $('autoCanvas'),
   });
   if (savedUi.beatW) {
     Grid.setView(savedUi.beatW, savedUi.rowHeight);
@@ -150,14 +151,15 @@
   const cursorTick = () => clamp(Transport.currentTick(), 0, MB.songTicks(State.project) - 1);
   $('inpBpm').addEventListener('change', (e) => {
     const tick = cursorTick();
-    const v = clamp(Math.round(+e.target.value) || MB.bpmAt(State.project, tick), MB.BPM_MIN, MB.BPM_MAX);
-    if (v !== MB.bpmAt(State.project, tick)) State.change((p) => MB.setTempoAt(p, tick, v), 'project');
+    const now = Math.round(MB.bpmAt(State.project, tick)); // v postupné změně tempa průběžné
+    const v = clamp(Math.round(+e.target.value) || now, MB.BPM_MIN, MB.BPM_MAX);
+    if (v !== now) State.change((p) => MB.setTempoAt(p, tick, v), 'project');
     else e.target.value = v;
   });
 
   let shownBpm = null;
   function syncBpm() {
-    const bpm = MB.bpmAt(State.project, cursorTick());
+    const bpm = Math.round(MB.bpmAt(State.project, cursorTick()));
     if (bpm === shownBpm || document.activeElement === $('inpBpm')) return;
     shownBpm = bpm;
     $('inpBpm').value = bpm;
@@ -230,6 +232,42 @@
     State.saveUi();
   }
 
+  // Křivka hlasitosti stopy (pruh pod mřížkou)
+  $('btnAuto').addEventListener('click', toggleAutoLane);
+
+  function toggleAutoLane() {
+    State.ui.autoLane = !State.ui.autoLane;
+    syncToolbar();
+    Grid.layout();
+    State.saveUi();
+  }
+
+  document.querySelectorAll('[data-auto]').forEach((btn) => {
+    btn.addEventListener('click', () => autoPreset(btn.dataset.auto));
+  });
+
+  /** Náběh / doznění aktuální stopy v oblasti smyčky, nebo smazání křivky. */
+  function autoPreset(kind) {
+    const p = State.project;
+    const t = State.currentTrack();
+    if (kind === 'clear') {
+      if (!t.volumeAuto || !t.volumeAuto.length) {
+        toast('Stopa křivku hlasitosti nemá – hraje celou dobu na 100 %.');
+        return;
+      }
+      State.change(() => { t.volumeAuto = []; }, 'notes');
+      toast(`Křivka smazaná – „${t.name}“ hraje celou dobu na 100 %.`);
+      return;
+    }
+    const [from, to] = MB.loopRange(p);
+    const fadeIn = kind === 'in';
+    State.change(() => MB.setAutoRamp(t, from, to, fadeIn ? 0 : 1, fadeIn ? 1 : 0), 'notes');
+    const bar = MB.barTicks(p);
+    const whole = from === 0 && to === MB.songTicks(p);
+    toast(`${fadeIn ? 'Náběh' : 'Doznění'} stopy „${t.name}“ v taktech ${Math.floor(from / bar) + 1}–${Math.ceil(to / bar)}.` +
+      (whole ? ' Kratší úsek vybereš tažením v pravítku (oblast smyčky).' : ''), { timeout: 4500 });
+  }
+
   function toggleGhosts() {
     State.ui.ghosts = !State.ui.ghosts;
     Grid.markDirty();
@@ -257,6 +295,8 @@
     $('btnLoop').classList.toggle('on', p.loop);
     $('btnFollow').classList.toggle('on', State.ui.follow);
     $('btnGhosts').classList.toggle('on', State.ui.ghosts);
+    $('btnAuto').classList.toggle('on', State.ui.autoLane);
+    document.body.classList.toggle('auto-open', State.ui.autoLane);
     document.title = `${p.name} – MakerBeater`;
   }
 
@@ -759,6 +799,7 @@
     const t = State.currentTrack();
     const corner = $('corner');
     corner.style.setProperty('--track-color', t.color);
+    $('autoHead').style.setProperty('--track-color', t.color);
     corner.innerHTML = '<div class="corner-tempo">♩ Tempo</div><div class="corner-track"><span class="dot"></span><span></span></div>';
     corner.querySelector('.corner-track').lastChild.textContent = t.name;
     corner.title = `${t.name} – ${MB.getInstrument(t.instrument).name}`;
@@ -893,6 +934,8 @@
       toggleFollow();
     } else if (key === 'g') {
       toggleGhosts();
+    } else if (key === 'k') {
+      toggleAutoLane();
     } else if (key === '+' || key === '=') {
       Grid.zoomX(1.25);
     } else if (key === '-') {

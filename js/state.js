@@ -66,13 +66,50 @@
   const barTicks = (p) => p.beatsPerBar * PPQ;
 
   // ---------------------------------------------------------------------------
-  // Tempo: `p.bpm` platí od začátku, `p.tempoChanges` = [{ tick, bpm }] mění tempo
-  // od daného místa dál (seřazené podle ticku, tick > 0). Převod pozice na sekundy
-  // se proto počítá po úsecích se stejným tempem.
+  // Tempo: `p.bpm` platí od začátku, `p.tempoChanges` = [{ tick, bpm, ramp? }] mění tempo
+  // od daného místa dál (seřazené podle ticku, tick > 0). `ramp` = přes kolik ticků se
+  // tempo na nové plynule rozjede (chybí = skokem). V rampě tempo roste lineárně
+  // s pozicí, čas se proto počítá integrálem (logaritmus) – noty sedí přesně.
   // ---------------------------------------------------------------------------
   const BPM_MIN = 30;
   const BPM_MAX = 300;
   const tempoList = (p) => p.tempoChanges || [];
+
+  /**
+   * Úseky tempa: od `tick` jde tempo plynule z `from` na `to` během `ramp` ticků
+   * a pak drží `to` až do dalšího úseku. Rampa nikdy nepřesáhne další změnu tempa.
+   */
+  function tempoSegments(p) {
+    const list = tempoList(p);
+    const segs = [{ tick: 0, from: p.bpm, to: p.bpm, ramp: 0 }];
+    list.forEach((c, i) => {
+      const next = i + 1 < list.length ? list[i + 1].tick : Infinity;
+      const ramp = Math.max(0, Math.min(c.ramp || 0, next - c.tick));
+      segs.push({ tick: c.tick, from: segs[segs.length - 1].to, to: c.bpm, ramp });
+    });
+    return segs;
+  }
+
+  function segmentIndex(segs, tick) {
+    let i = 0;
+    while (i + 1 < segs.length && segs[i + 1].tick <= tick) i++;
+    return i;
+  }
+
+  /** Tempo v úseku `s` ve vzdálenosti `x` ticků od jeho začátku. */
+  const segBpm = (s, x) => (x < s.ramp ? s.from + ((s.to - s.from) * x) / s.ramp : s.to);
+
+  /** Čas (s) od začátku úseku `s` do vzdálenosti `x` ticků. */
+  function segSec(s, x) {
+    const r = Math.min(x, s.ramp);
+    let sec = 0;
+    if (r > 0) {
+      sec = Math.abs(s.to - s.from) < 1e-9
+        ? (r * 60) / (s.from * PPQ)
+        : ((60 * s.ramp) / (PPQ * (s.to - s.from))) * Math.log(segBpm(s, r) / s.from); // ∫ 60 / (PPQ · bpm(x)) dx
+    }
+    return sec + (Math.max(0, x - s.ramp) * 60) / (s.to * PPQ);
+  }
 
   /** Index změny tempa, která platí v místě `tick` (-1 = základní tempo od začátku). */
   function tempoIndexAt(p, tick) {
@@ -82,33 +119,37 @@
     return i;
   }
 
-  const bpmAt = (p, tick) => {
-    const i = tempoIndexAt(p, tick);
-    return i < 0 ? p.bpm : tempoList(p)[i].bpm;
-  };
+  /** Tempo v místě `tick` (v rampě průběžné, tedy i s desetinami). */
+  function bpmAt(p, tick) {
+    const segs = tempoSegments(p);
+    const s = segs[segmentIndex(segs, tick)];
+    return segBpm(s, tick - s.tick);
+  }
   const secPerTick = (p, tick = 0) => 60 / bpmAt(p, tick) / PPQ;
 
-  /** Tick nejbližší změny tempa za `tick` (Infinity = už žádná). */
+  /** Nejbližší místo za `tick`, kde se mění průběh tempa (změna nebo konec rampy). */
   function nextTempoChange(p, tick) {
-    for (const c of tempoList(p)) if (c.tick > tick) return c.tick;
+    for (const s of tempoSegments(p)) {
+      if (s.tick > tick) return s.tick;
+      if (s.ramp && s.tick + s.ramp > tick) return s.tick + s.ramp;
+    }
     return Infinity;
   }
 
   /** Pozice v ticích → čas v sekundách od začátku skladby. */
   function tickToSec(p, tick) {
+    const segs = tempoSegments(p);
     let sec = 0;
-    let from = 0;
-    let bpm = p.bpm;
-    for (const c of tempoList(p)) {
-      if (c.tick >= tick) break;
-      sec += ((c.tick - from) * 60) / bpm / PPQ;
-      from = c.tick;
-      bpm = c.bpm;
+    for (let i = 0; i < segs.length; i++) {
+      const s = segs[i];
+      const end = i + 1 < segs.length ? segs[i + 1].tick : Infinity;
+      if (tick <= end) return sec + segSec(s, tick - s.tick);
+      sec += segSec(s, end - s.tick);
     }
-    return sec + ((tick - from) * 60) / bpm / PPQ;
+    return sec;
   }
 
-  /** Nastaví tempo úseku, ve kterém leží `tick` (začátek skladby = základní tempo). */
+  /** Nastaví (cílové) tempo úseku, ve kterém leží `tick` (začátek skladby = základní tempo). */
   function setTempoAt(p, tick, bpm) {
     const i = tempoIndexAt(p, tick);
     if (i < 0) p.bpm = bpm;
@@ -116,19 +157,67 @@
   }
 
   /**
-   * Změna tempa od `tick` dál (už existující na stejném místě se jen přepíše).
-   * Nová změna na stejné tempo, jaké už v tom místě platí, se nepřidá – nic by neměnila.
+   * Změna tempa od `tick` dál, `ramp` = přes kolik ticků se rozjede (0 = skokem).
+   * Existující změna na stejném místě se jen přepíše. Nová změna na stejné tempo,
+   * jaké už v tom místě platí, se nepřidá – nic by neměnila.
    */
-  function setTempoChange(p, tick, bpm) {
+  function setTempoChange(p, tick, bpm, ramp = 0) {
     if (tick <= 0) {
       p.bpm = bpm;
       return;
     }
     if (!p.tempoChanges) p.tempoChanges = [];
-    const existing = p.tempoChanges.find((c) => c.tick === tick);
-    if (existing) existing.bpm = bpm;
-    else if (bpmAt(p, tick) !== bpm) p.tempoChanges.push({ tick, bpm });
+    let c = p.tempoChanges.find((x) => x.tick === tick);
+    if (!c) {
+      if (bpmAt(p, tick) === bpm) return;
+      c = { tick, bpm };
+      p.tempoChanges.push(c);
+    }
+    c.bpm = bpm;
+    if (ramp > 0) c.ramp = Math.round(ramp);
+    else delete c.ramp;
     p.tempoChanges.sort((x, y) => x.tick - y.tick);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Křivka hlasitosti stopy: `track.volumeAuto` = [{ tick, value }], value 0–1 násobí
+  // hlasitost stopy (1 = jak je nastavená posuvníkem). Mezi body se hlasitost mění
+  // plynule, před prvním a za posledním bodem drží jejich hodnotu. Bez bodů = 1.
+  // ---------------------------------------------------------------------------
+  function autoValueAt(points, tick) {
+    if (!points || !points.length) return 1;
+    if (tick <= points[0].tick) return points[0].value;
+    for (let i = 1; i < points.length; i++) {
+      const b = points[i];
+      if (tick <= b.tick) {
+        const a = points[i - 1];
+        if (tick === b.tick || b.tick === a.tick) return b.value; // přesně na bodu bez zaokrouhlovací chyby
+        return a.value + ((b.value - a.value) * (tick - a.tick)) / (b.tick - a.tick);
+      }
+    }
+    return points[points.length - 1].value;
+  }
+
+  const autoRound = (v) => Math.round(clamp(v, 0, 1) * 100) / 100;
+
+  /** Bod křivky na místě `tick` (existující se přepíše). Vrací ten bod. */
+  function setAutoPoint(track, tick, value) {
+    if (!track.volumeAuto) track.volumeAuto = [];
+    let pt = track.volumeAuto.find((x) => x.tick === tick);
+    if (!pt) {
+      pt = { tick, value: 1 };
+      track.volumeAuto.push(pt);
+      track.volumeAuto.sort((x, y) => x.tick - y.tick);
+    }
+    pt.value = autoRound(value);
+    return pt;
+  }
+
+  /** Náběh / doznění: v úseku [from, to] jde křivka z `a` na `b` (body uvnitř se nahradí). */
+  function setAutoRamp(track, from, to, a, b) {
+    const pts = (track.volumeAuto || []).filter((pt) => pt.tick < from || pt.tick > to);
+    pts.push({ tick: from, value: autoRound(a) }, { tick: to, value: autoRound(b) });
+    track.volumeAuto = pts.sort((x, y) => x.tick - y.tick);
   }
 
   // ---------------------------------------------------------------------------
@@ -211,6 +300,7 @@
       reverb: def.reverb != null ? def.reverb : 0.15,
       sidechain: 0, // 0–1: jak moc se stopa „ztiší“ při kopáku
       drive: 0,     // 0–1: zkreslení
+      volumeAuto: [], // křivka hlasitosti v čase: [{ tick, value 0–1 }]
       mute: false,
       solo: false,
       notes: [],
@@ -502,9 +592,12 @@
       if (!c || typeof c !== 'object') continue;
       const tick = Math.round(Number(c.tick));
       if (!Number.isFinite(tick) || tick <= 0 || tick > 128 * 7 * PPQ) continue;
-      tempos.set(tick, int(c.bpm, BPM_MIN, BPM_MAX, p.bpm));
+      const change = { tick, bpm: int(c.bpm, BPM_MIN, BPM_MAX, p.bpm) };
+      const ramp = int(c.ramp, 0, 128 * 7 * PPQ, 0); // postupná změna přes `ramp` ticků
+      if (ramp > 0) change.ramp = ramp;
+      tempos.set(tick, change);
     }
-    p.tempoChanges = [...tempos].sort((x, y) => x[0] - y[0]).map(([tick, bpm]) => ({ tick, bpm }));
+    p.tempoChanges = [...tempos.values()].sort((x, y) => x.tick - y.tick);
 
     const trackIds = new Set();
     for (const rt of raw.tracks.slice(0, 64)) {
@@ -520,6 +613,14 @@
       t.reverb = num(rt.reverb, 0, 1, t.reverb);
       t.sidechain = num(rt.sidechain, 0, 1, 0);
       t.drive = num(rt.drive, 0, 1, 0);
+      const auto = new Map(); // křivka hlasitosti: platné body, seřazené, na jednom místě jeden
+      for (const pt of Array.isArray(rt.volumeAuto) ? rt.volumeAuto.slice(0, 2000) : []) {
+        if (!pt || typeof pt !== 'object') continue;
+        const tick = Math.round(Number(pt.tick));
+        if (!Number.isFinite(tick) || tick < 0 || tick > 128 * 7 * PPQ) continue;
+        auto.set(tick, autoRound(num(pt.value, 0, 1, 1)));
+      }
+      t.volumeAuto = [...auto].sort((x, y) => x[0] - y[0]).map(([tick, value]) => ({ tick, value }));
       t.mute = !!rt.mute;
       t.solo = !!rt.solo;
 
@@ -590,6 +691,7 @@
       tool: 'draw',          // 'draw' | 'select' | 'erase'
       follow: true,          // posouvat mřížku za přehrávacím kurzorem
       ghosts: true,          // ukazovat noty ostatních stop
+      autoLane: true,        // ukazovat pruh s křivkou hlasitosti
     },
 
     /** Volá main.js až po načtení všech skriptů (nástroje jsou v audio.js). */
@@ -610,7 +712,7 @@
       const remembered = ui.trackId && this.project.tracks.find((t) => t.id === ui.trackId);
       const pluck = this.project.tracks.find((t) => t.instrument === 'pluck');
       this.ui.trackId = (remembered || pluck || this.project.tracks[0]).id;
-      for (const k of ['tool', 'follow', 'ghosts']) if (ui[k] !== undefined) this.ui[k] = ui[k];
+      for (const k of ['tool', 'follow', 'ghosts', 'autoLane']) if (ui[k] !== undefined) this.ui[k] = ui[k];
       window.addEventListener('pagehide', () => this.flushSave());
     },
 
@@ -783,6 +885,7 @@
         tool: this.ui.tool,
         follow: this.ui.follow,
         ghosts: this.ui.ghosts,
+        autoLane: this.ui.autoLane,
       }, extra);
       storageSet(UI_KEY, JSON.stringify(ui));
     },
@@ -821,7 +924,8 @@
     on, emit,
     clamp, uid, pitchClass, noteName, isBlackKey,
     songTicks, stepTicks, barTicks, secPerTick, loopRange,
-    BPM_MIN, BPM_MAX, bpmAt, tempoIndexAt, nextTempoChange, tickToSec, setTempoAt, setTempoChange,
+    BPM_MIN, BPM_MAX, bpmAt, tempoIndexAt, tempoSegments, nextTempoChange, tickToSec, setTempoAt, setTempoChange,
+    autoValueAt, setAutoPoint, setAutoRamp,
     scaleSteps, inScale, isRoot, scaleActive, snapActive, snapToScale, scaleIndex, scaleIndexToPitch, transposeInScale,
     createNote, createTrack, createProject, createEmptyProject, createDemoProject, createHouseProject,
     createBreakcoreProject, cloneTrack, uniqueTrackName, chopNotes, STEP_OPTIONS,

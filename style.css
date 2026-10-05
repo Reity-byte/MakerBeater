@@ -549,7 +549,7 @@ dialog.help::backdrop { background: rgba(5, 7, 10, 0.6); backdrop-filter: blur(2
   min-height: 0;
   display: grid;
   grid-template-columns: var(--keys-w, 64px) minmax(0, 1fr);
-  grid-template-rows: 48px minmax(0, 1fr); /* pravítko: pruh tempa 18 px + takty 30 px */
+  grid-template-rows: 50px minmax(0, 1fr) var(--auto-h, 0px); /* pravítko (tempo 20 px + takty 30 px), mřížka, křivka */
   background: #0b0d12;
 }
 
@@ -567,7 +567,7 @@ dialog.help::backdrop { background: rgba(5, 7, 10, 0.6); backdrop-filter: blur(2
   font-weight: 600;
 }
 .corner-tempo {
-  height: 18px;
+  height: 20px;
   flex: none;
   display: flex;
   align-items: center;
@@ -581,12 +581,17 @@ dialog.help::backdrop { background: rgba(5, 7, 10, 0.6); backdrop-filter: blur(2
 .corner .dot { width: 8px; height: 8px; flex: none; border-radius: 50%; background: var(--track-color); }
 .corner-track span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
-/* pole pro zadání tempa přímo v pravítku */
+/* okénko pro zadání tempa přímo v pravítku: číslo + skokem / postupně */
 .tempo-edit {
   position: fixed;
   z-index: 60;
-  width: 64px;
-  height: 18px;
+  display: flex;
+  gap: 4px;
+  height: 20px;
+}
+.tempo-edit input,
+.tempo-edit select {
+  height: 20px;
   padding: 0 4px;
   border: 1px solid #fcc419;
   border-radius: 4px;
@@ -595,6 +600,39 @@ dialog.help::backdrop { background: rgba(5, 7, 10, 0.6); backdrop-filter: blur(2
   font: 600 11px var(--font);
   outline: none;
   box-shadow: 0 4px 14px rgba(0, 0, 0, 0.5);
+}
+.tempo-edit input { width: 64px; }
+.tempo-edit select { width: 142px; cursor: pointer; }
+
+/* křivka hlasitosti stopy pod mřížkou */
+body.auto-open .editor { --auto-h: 84px; }
+body:not(.auto-open) .auto-head,
+body:not(.auto-open) #autoCanvas { display: none; }
+.auto-head {
+  grid-row: 3;
+  grid-column: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px;
+  overflow: hidden;
+  background: #0e1219;
+  border-top: 1px solid #262c3a;
+  border-right: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 600;
+}
+.auto-head .auto-title { display: flex; align-items: center; gap: 5px; white-space: nowrap; }
+.auto-head .dot { width: 7px; height: 7px; flex: none; border-radius: 50%; background: var(--track-color, #8ab4f8); }
+.auto-head .auto-btns { display: flex; flex-wrap: wrap; gap: 3px; }
+.auto-head .btn { height: 22px; min-width: 24px; padding: 0 5px; font-size: 12px; }
+#autoCanvas {
+  grid-row: 3;
+  grid-column: 2;
+  display: block;
+  cursor: crosshair;
+  touch-action: none;
 }
 
 #rulerCanvas {

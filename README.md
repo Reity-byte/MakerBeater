@@ -53,8 +53,12 @@ Funguje v aktuálním Chrome, Edge, Firefoxu i Safari. Nejlíp v Chrome/Edge (ne
 - **Efekty u stopy:** dozvuk, **sidechain** („pumpování“ do kopáku jako v house) a **zkreslení**.
 - **Šablony:** *House starter pack* (125 BPM, 909, sidechain) a *Breakcore* (172 BPM, rozsekaný amen rytmus).
 - **Přehrávání:** Play/Pauza/Stop, smyčka (oblast se nastaví tažením v pravítku), sledování kurzoru, změna tempa za běhu.
-- **Tempo po úsecích:** v horním pruhu pravítka klik přidá změnu tempa od taktu, tah ji posune (Alt = po dobách),
-  pravé tlačítko nebo prázdné pole ji smaže. Pole **BPM** ukazuje a mění tempo úseku, ve kterém je kurzor.
+- **Tempo po úsecích:** v horním pruhu pravítka klik přidá změnu tempa od taktu, **skokem nebo postupně**
+  (zrychlení / zpomalení za 1 dobu až 16 taktů), tah ji posune (Alt = po dobách), pravé tlačítko nebo prázdné
+  pole ji smaže. Pruh ukazuje průběh tempa jako čáru. Pole **BPM** ukazuje a mění tempo úseku pod kurzorem.
+- **Křivka hlasitosti stopy (K):** pruh pod mřížkou. Klik přidá bod, tah ho posune, pravé tlačítko smaže.
+  Tlačítka **↗ náběh** a **↘ doznění** udělají plynulé zesílení z ticha / zeslabení do ticha v oblasti smyčky
+  (tu nastavíš tažením v pravítku). Nové části skladby tak můžou nabíhat postupně místo „hned naplno“.
 - **Hudební pomocníci:** stupnice (dur, moll, harmonická moll, pentatoniky, blues, dórská, chromatická),
   přichytávání ke stupnici, kvantizace (Q), takt 2/4 až 7/4, mřížka 1/4 až 1/64 včetně triol,
   rozsekání not na rychlé rolly (R).
@@ -96,8 +100,8 @@ na jednom globálním objektu `window.MB` a moduly spolu mluví přes události 
 **Audio řetězec.**
 
 ```
-hlas (nota) → bus stopy → mute/solo → hlasitost → panorama ─┬─→ master → kompresor → limiter → repro
-                                                             └─→ send → dozvuk (konvoluce) ─┘
+hlas → bus stopy → mute/solo → zkreslení → hlasitost → křivka hlasitosti → sidechain → panorama ─┬─→ master → kompresor → limiter → repro
+                                                                                                  └─→ send → dozvuk (konvoluce) ─┘
 ```
 
 **Scheduler** („A Tale of Two Clocks“). Časovač ve Web Workeru se probouzí každých 25 ms. Pokaždé naplánuje
@@ -123,11 +127,12 @@ Projekt je obyčejný JSON (tak se i exportuje):
   "scale": { "root": 9, "type": "minor" },
   "snapToScale": true,
   "loop": true, "loopStart": 0, "loopEnd": null,
-  "tempoChanges": [ { "tick": 3072, "bpm": 140 } ],
+  "tempoChanges": [ { "tick": 3072, "bpm": 140 }, { "tick": 4608, "bpm": 170, "ramp": 1536 } ],
   "tracks": [
     {
       "id": "k3f9a1x2", "name": "Bas", "instrument": "bass", "color": "#4dabf7",
       "volume": 0.8, "pan": 0, "reverb": 0.04, "mute": false, "solo": false,
+      "volumeAuto": [ { "tick": 0, "value": 0 }, { "tick": 1536, "value": 1 } ],
       "notes": [ { "id": "x81kq0a9", "pitch": 45, "start": 0, "length": 72, "velocity": 0.9 } ]
     }
   ]
@@ -138,9 +143,12 @@ Projekt je obyčejný JSON (tak se i exportuje):
   mřížce a jsou to vždy celá čísla.
 - **`pitch`** je MIDI číslo (60 = C4). U bicí stopy je to číslo řádku (0 = kick, 1 = snare… viz `DRUM_ROWS`).
 - **`loopEnd: null`** = smyčka až do konce skladby.
-- **Tempo:** `bpm` platí od začátku, `tempoChanges` mění tempo od daného ticku dál (seřazené). Převod pozice
-  na sekundy dělá `MB.tickToSec(p, tick)` po úsecích. Scheduler plánuje vždy jen po nejbližší změnu tempa
-  a na hranici si založí novou kotvu, takže noty sedí přesně i při smyčce přes víc úseků.
+- **Tempo:** `bpm` platí od začátku, `tempoChanges` mění tempo od daného ticku dál (seřazené). `ramp` = přes
+  kolik ticků se tempo na nové plynule rozjede (chybí = skokem). V rampě tempo roste lineárně s pozicí, takže
+  `MB.tickToSec(p, tick)` počítá čas integrálem (logaritmus) – přesně, bez zaokrouhlování. Scheduler bere čas
+  každé noty z mapy temp, změna tempa za běhu proto ovlivní jen to, co ještě není naplánované.
+- **`volumeAuto`** = křivka hlasitosti stopy: body `{ tick, value }`, value 0–1 násobí hlasitost stopy, mezi body
+  plynule. Při přehrávání se plánuje po úsecích na `GainNode` v kanálu stopy, při exportu celá předem.
 - Při načtení (localStorage i import) projde projekt kontrolou `normalizeProject()`. Čísla se oříznou na rozumný
   rozsah, neznámý nástroj se nahradí klavírem a vadné noty se zahodí.
 

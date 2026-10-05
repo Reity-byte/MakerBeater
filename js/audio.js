@@ -211,7 +211,8 @@
 
   /**
    * Kanál jedné stopy:
-   * bus → mute/solo → zkreslení → hlasitost → sidechain → panorama → master (+ send do dozvuku)
+   * bus → mute/solo → zkreslení → hlasitost → křivka hlasitosti → sidechain → panorama
+   *   → master (+ send do dozvuku)
    */
   function createStrip(ctx, master) {
     const bus = ctx.createGain();       // sem hrají noty ze sekvenceru
@@ -220,6 +221,7 @@
     const drive = ctx.createWaveShaper(); // zkreslení (bez křivky = jen propouští)
     const driveOut = ctx.createGain();  // vyrovnání hlasitosti po zkreslení
     const volume = ctx.createGain();
+    const auto = ctx.createGain();      // křivka hlasitosti v čase (náběhy, doznění)
     const duck = ctx.createGain();      // sidechain: při kopáku se na chvíli ztiší
     const panner = ctx.createStereoPanner ? ctx.createStereoPanner() : ctx.createGain();
     const send = ctx.createGain();
@@ -228,17 +230,18 @@
     preview.connect(drive);
     drive.connect(driveOut);
     driveOut.connect(volume);
-    volume.connect(duck);
+    volume.connect(auto);
+    auto.connect(duck);
     duck.connect(panner);
     panner.connect(master.input);
     panner.connect(send);
     send.connect(master.reverbIn);
-    return { bus, mute, preview, drive, driveOut, volume, duck, panner, send, sidechain: 0, state: {}, applied: {} };
+    return { bus, mute, preview, drive, driveOut, volume, auto, duck, panner, send, sidechain: 0, state: {}, applied: {} };
   }
 
   function disconnectStrip(strip) {
     for (const node of [strip.bus, strip.mute, strip.preview, strip.drive, strip.driveOut,
-      strip.volume, strip.duck, strip.panner, strip.send]) {
+      strip.volume, strip.auto, strip.duck, strip.panner, strip.send]) {
       try { node.disconnect(); } catch (err) { /* nic */ }
     }
   }
@@ -304,6 +307,32 @@
     set('send', strip.send.gain, clamp(track.reverb || 0, 0, 1) * 0.8);
     applyDrive(strip, track.drive);
     strip.sidechain = clamp(track.sidechain || 0, 0, 1);
+  }
+
+  /**
+   * Místa v (from, to], kde křivka hlasitosti potřebuje bod automatizace: body křivky
+   * a uvnitř tempové rampy každá 1/16 (tam čas s pozicí neběží lineárně).
+   */
+  function automationBreaks(p, points, from, to) {
+    const ticks = [to];
+    for (const pt of points) if (pt.tick > from && pt.tick < to) ticks.push(pt.tick);
+    const step = MB.PPQ / 4;
+    for (const s of MB.tempoSegments(p)) {
+      if (!s.ramp) continue;
+      const end = Math.min(to, s.tick + s.ramp);
+      for (let t = Math.max(s.tick, Math.ceil(from / step) * step); t <= end; t += step) {
+        if (t > from && t < to) ticks.push(t);
+      }
+    }
+    return [...new Set(ticks)].sort((x, y) => x - y);
+  }
+
+  /** Naplánuje křivku hlasitosti `points` na AudioParam pro úsek [from, to], který začíná v čase `time`. */
+  function scheduleAutomationRange(param, p, points, from, to, time) {
+    const base = MB.tickToSec(p, from);
+    for (const tick of automationBreaks(p, points, from, to)) {
+      param.linearRampToValueAtTime(MB.autoValueAt(points, tick), time + MB.tickToSec(p, tick) - base);
+    }
   }
 
   /** Je nota kopák (spouští sidechain ostatních stop)? */
@@ -1477,6 +1506,11 @@
       const strip = this._strip(track);
       if (!strip) return null;
       const t = this.ctx.currentTime + 0.005;
+      if (strip.autoHeld) { // po zastavení zůstala hlasitost z křivky – náhled má znít naplno
+        strip.autoHeld = false;
+        strip.auto.gain.cancelScheduledValues(this.ctx.currentTime);
+        strip.auto.gain.setTargetAtTime(1, this.ctx.currentTime, 0.01);
+      }
       const voice = getInstrument(track.instrument).play(this.ctx, strip.preview, pitch, t, dur, vel, {}, tune);
       if (voice) this.voices.push(voice);
       return voice;
@@ -1489,6 +1523,69 @@
       for (const v of this.voices) v.cut(now);
       this.voices = [];
       for (const strip of this.strips.values()) strip.state = {};
+    },
+
+    // --- Křivky hlasitosti stop při přehrávání ---
+    // (bez skutečného AudioContextu – např. v testech s falešnými hodinami – se nic neplánuje)
+
+    get _audioReady() {
+      return !!this.ctx && typeof this.ctx.createGain === 'function';
+    },
+
+    /** Start přehrávání z místa `tick` v čase `time`: každá stopa najede na hodnotu své křivky. */
+    startAutomation(p, tick, time) {
+      if (!this._audioReady) return;
+      const now = this.ctx.currentTime;
+      for (const track of p.tracks) {
+        const strip = this.strips.get(track.id);
+        if (!strip) continue;
+        const g = strip.auto.gain;
+        g.cancelScheduledValues(now);
+        g.setValueAtTime(g.value, now);
+        g.linearRampToValueAtTime(MB.autoValueAt(track.volumeAuto, tick), time);
+        strip.autoUsed = !!(track.volumeAuto && track.volumeAuto.length);
+        strip.autoHeld = false;
+      }
+    },
+
+    /** Naplánuje křivky všech stop pro úsek [from, to], který začíná v čase `time`. */
+    scheduleAutomation(p, from, to, time) {
+      if (!this._audioReady) return;
+      for (const track of p.tracks) {
+        const strip = this.strips.get(track.id);
+        if (!strip) continue;
+        const pts = track.volumeAuto;
+        if (pts && pts.length) {
+          strip.autoUsed = true;
+          scheduleAutomationRange(strip.auto.gain, p, pts, from, to, time);
+        } else if (strip.autoUsed) { // křivku někdo za běhu smazal → zpátky na 100 %
+          strip.autoUsed = false;
+          strip.auto.gain.linearRampToValueAtTime(1, time + 0.02);
+        }
+      }
+    },
+
+    /** Skok smyčky: v čase `time` začíná znovu místo `tick`. */
+    jumpAutomation(p, tick, time) {
+      if (!this._audioReady) return;
+      for (const track of p.tracks) {
+        const strip = this.strips.get(track.id);
+        if (strip && track.volumeAuto && track.volumeAuto.length) {
+          strip.auto.gain.setValueAtTime(MB.autoValueAt(track.volumeAuto, tick), time);
+        }
+      }
+    },
+
+    /** Zastavení: naplánované změny zrušit a hlasitost podržet (dozvuky nesmí najednou zesílit). */
+    holdAutomation() {
+      if (!this._audioReady) return;
+      const now = this.ctx.currentTime;
+      for (const strip of this.strips.values()) {
+        const g = strip.auto.gain;
+        g.cancelScheduledValues(now);
+        g.setValueAtTime(g.value, now);
+        strip.autoHeld = true;
+      }
     },
 
     pruneVoices() {
@@ -1600,13 +1697,14 @@
       if (p.loop && tick >= loopEnd) tick = loopStart;
       if (!p.loop && tick >= songEnd) tick = 0;
 
-      const spt = MB.secPerTick(p, tick);
       const t0 = ctx.currentTime + 0.05; // malá rezerva, ať první nota nepřijde pozdě
       this.playing = true;
       this.playStartTick = tick;
       this.nextTick = tick;
+      this.nextTime = t0; // kdy zazní `nextTick`
       this.endTime = Infinity;
-      this.anchors = [{ time: t0, tick, spt }];
+      this.anchors = [{ time: t0, tick, spt: MB.secPerTick(p, tick) }];
+      Engine.startAutomation(p, tick, t0);
       this._chaseNotes(p, tick, t0);
       if (!this.ticker) this.ticker = createTicker(() => this._schedule());
       this.ticker.start();
@@ -1679,43 +1777,43 @@
       this.playing = false;
       if (this.ticker) this.ticker.stop();
       if (silence) Engine.silence();
+      Engine.holdAutomation();
     },
 
-    /** Naplánuje vše, co začíná před (teď + LOOKAHEAD). */
+    /**
+     * Naplánuje vše, co začíná před (teď + LOOKAHEAD). Čas každé noty se počítá z mapy
+     * temp (i v plynulé rampě), od přesně známého času `nextTime` místa `nextTick`.
+     * Změna tempa za běhu proto ovlivní jen to, co ještě naplánované není.
+     */
     _schedule() {
       if (!this.playing) return;
       const ctx = Engine.ctx;
       const p = this.project;
       const horizon = ctx.currentTime + LOOKAHEAD;
 
-      for (let guard = 0; guard < 64; guard++) {
-        let a = this.anchors[this.anchors.length - 1];
-        const nextTime = a.time + (this.nextTick - a.tick) * a.spt;
-        if (nextTime >= horizon) break;
-
-        const spt = MB.secPerTick(p, this.nextTick);
-        if (spt !== a.spt) { // začátek úseku s jiným tempem nebo změna tempa za běhu – nová kotva
-          a = { time: nextTime, tick: this.nextTick, spt };
-          this.anchors.push(a);
-        }
-
+      for (let guard = 0; guard < 64 && this.nextTime < horizon; guard++) {
         const [loopStart, loopEnd] = MB.loopRange(p);
         const regionEnd = p.loop ? loopEnd : MB.songTicks(p);
         if (this.nextTick >= regionEnd) {
           if (!p.loop) { // konec skladby – další noty už neplánujeme
-            this.endTime = Math.min(this.endTime, nextTime);
+            this.endTime = Math.min(this.endTime, this.nextTime);
             break;
           }
           this.nextTick = loopStart; // skok na začátek smyčky
-          this.anchors.push({ time: nextTime, tick: loopStart, spt: MB.secPerTick(p, loopStart) });
+          this.anchors.push({ time: this.nextTime, tick: loopStart, spt: MB.secPerTick(p, loopStart) });
+          Engine.jumpAutomation(p, loopStart, this.nextTime);
           this.endTime = Infinity;
           continue;
         }
 
-        // úsek plánujeme jen po nejbližší změnu tempa – za ní se počítá s novým tempem
-        const tempoEnd = MB.nextTempoChange(p, this.nextTick);
-        const toTick = Math.min(regionEnd, tempoEnd, this.nextTick + (horizon - nextTime) / spt);
-        this._scheduleRange(p, this.nextTick, toTick, a, regionEnd);
+        // úsek do horizontu, nejdál po nejbližší změnu průběhu tempa
+        const spt = MB.secPerTick(p, this.nextTick);
+        const toTick = Math.min(regionEnd, MB.nextTempoChange(p, this.nextTick),
+          this.nextTick + (horizon - this.nextTime) / spt);
+        const dt = this._scheduleRange(p, this.nextTick, toTick, this.nextTime, regionEnd);
+        // kotva pro kurzor: v úseku stačí průměrné tempo (úseky jsou kratší než 0,12 s)
+        this.anchors.push({ time: this.nextTime, tick: this.nextTick, spt: dt / (toTick - this.nextTick) });
+        this.nextTime += dt;
         this.nextTick = toTick;
       }
 
@@ -1725,8 +1823,13 @@
       Engine.pruneVoices();
     },
 
-    /** Noty se začátkem v intervalu [from, to) – čas se počítá přesně z kotvy. */
-    _scheduleRange(p, from, to, anchor, regionEnd) {
+    /**
+     * Noty se začátkem v [from, to) a křivky hlasitosti; úsek začíná v čase `time`.
+     * Vrací délku úseku v sekundách.
+     */
+    _scheduleRange(p, from, to, time, regionEnd) {
+      const base = MB.tickToSec(p, from);
+      const at = (tick) => time + MB.tickToSec(p, tick) - base;
       const events = [];
       for (const track of p.tracks) {
         for (const n of track.notes) {
@@ -1736,11 +1839,12 @@
       // chronologicky (kvůli nástrojům se stavem, např. dusení hi-hatu)
       if (events.length > 1) events.sort((x, y) => x[1].start - y[1].start);
       for (const [track, n] of events) {
-        const time = anchor.time + (n.start - anchor.tick) * anchor.spt;
         const len = Math.min(n.length, regionEnd - n.start); // na konci smyčky notu ořízneme
-        const dur = MB.tickToSec(p, n.start + len) - MB.tickToSec(p, n.start); // i přes změnu tempa
-        Engine.playNote(track, n.pitch, time, dur, n.velocity, n.tune || 0);
+        const start = at(n.start);
+        Engine.playNote(track, n.pitch, start, at(n.start + len) - start, n.velocity, n.tune || 0);
       }
+      Engine.scheduleAutomation(p, from, to, time);
+      return at(to) - time;
     },
 
     /** Při startu uprostřed dlouhé noty (např. pad) ji dohrajeme od aktuální pozice. */
@@ -1787,6 +1891,10 @@
       const strip = createStrip(ctx, master);
       applyStrip(ctx, strip, track, true, true);
       strips.push(strip);
+      if (track.volumeAuto && track.volumeAuto.length) { // křivka hlasitosti celé skladby předem
+        strip.auto.gain.setValueAtTime(MB.autoValueAt(track.volumeAuto, 0), t0);
+        scheduleAutomationRange(strip.auto.gain, project, track.volumeAuto, 0, songEnd, t0);
+      }
       const inst = getInstrument(track.instrument);
       for (const n of track.notes) {
         if (n.start >= songEnd) continue;

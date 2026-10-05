@@ -107,6 +107,9 @@
       <button class="btn icon toggle" id="btnGhosts" title="Ukázat noty ostatních stop (G)">
         <svg viewBox="0 0 24 24"><path d="M12 16l7.36-5.73L21 9l-9-7-9 7 1.63 1.27L12 16zm0 2.54l-7.38-5.73L3 14.07l9 7 9-7-1.63-1.27L12 18.54z"/></svg>
       </button>
+      <button class="btn icon toggle" id="btnAuto" title="Křivka hlasitosti stopy – postupné zesílení a zeslabení (K)">
+        <svg viewBox="0 0 24 24"><path d="M3 20h18v-2H3v2zm1.4-4.2l1.4 1.4L11 12l3 3 6.6-6.6-1.4-1.4L14 12.2l-3-3-6.6 6.6z"/></svg>
+      </button>
     </div>
 
     <!-- Master -->
@@ -166,6 +169,15 @@
         <canvas id="gridCanvas"></canvas>
         <div class="grid-scroll" id="gridScroll"><div id="gridSpacer"></div></div>
       </div>
+      <div class="auto-head" id="autoHead">
+        <div class="auto-title"><span class="dot"></span><span>Hlasitost</span></div>
+        <div class="auto-btns">
+          <button class="btn" data-auto="in" title="Náběh: stopa v oblasti smyčky postupně zesílí z ticha na 100 % (oblast nastavíš tažením v pravítku)">↗</button>
+          <button class="btn" data-auto="out" title="Doznění: stopa v oblasti smyčky postupně zeslabí ze 100 % do ticha">↘</button>
+          <button class="btn" data-auto="clear" title="Smazat křivku – stopa hraje celou dobu na 100 %">✕</button>
+        </div>
+      </div>
+      <canvas id="autoCanvas" title="Křivka hlasitosti stopy: klik = bod · tah = posun · pravé tlačítko = smazat · Alt = bez mřížky"></canvas>
     </section>
   </main>
 
@@ -231,7 +243,8 @@
         <dl>
           <dt>Klávesy vlevo</dt><dd>klik = zahraje tón, tažením glissando</dd>
           <dt>Pravítko</dt><dd>klik = skok · tah = oblast smyčky · dvojklik = celá skladba</dd>
-          <dt>Tempo po úsecích</dt><dd>horní pruh pravítka: klik = změna tempa od taktu · tah = posun (Alt = po dobách) · pravé tlačítko nebo prázdné pole = smazat · pole BPM mění tempo úseku pod kurzorem</dd>
+          <dt>Tempo po úsecích</dt><dd>horní pruh pravítka: klik = změna tempa od taktu, skokem nebo postupně (zrychlení / zpomalení přes zvolený počet taktů) · tah = posun (Alt = po dobách) · pravé tlačítko nebo prázdné pole = smazat · pole BPM mění tempo úseku pod kurzorem</dd>
+          <dt>Křivka hlasitosti (K)</dt><dd>pruh pod mřížkou: hlasitost stopy v čase – klik = bod, tah = posun, pravé tlačítko = smazat · ↗ náběh / ↘ doznění v oblasti smyčky jedním klikem</dd>
           <dt>Stopa</dt><dd>dvojklik na jméno = přejmenovat · dvojklik na posuvník = výchozí hodnota</dd>
           <dt>Sidechain</dt><dd>stopa se při každém kopáku na chvíli ztiší („pumpování“ jako v house)</dd>
           <dt>Ladění</dt><dd>u bicích: vyber údery a posuvníkem dole je přelaď (breakcore rolly)</dd>

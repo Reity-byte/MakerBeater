@@ -14,7 +14,7 @@
 
   const MIN_PITCH = MB.PITCH_MIN; // C1
   const MAX_PITCH = MB.PITCH_MAX; // C7
-  const TEMPO_H = 18;            // horní pruh pravítka se změnami tempa
+  const TEMPO_H = 20;            // horní pruh pravítka se změnami tempa
   const RULER_H = TEMPO_H + 30;  // + takty a smyčka
   const TEMPO_FONT = "600 10px 'Inter', 'Segoe UI', system-ui, sans-serif";
   const CLIPBOARD_KEY = 'makerbeater.clipboard.v1';
@@ -122,7 +122,10 @@
     rulerDrag: null,
     tempoDrag: null,    // tažení / klik v pruhu tempa
     tempoHover: null,   // tick značky tempa pod myší
-    tempoEdit: null,    // { tick, input, finish } – otevřené pole pro tempo
+    tempoEdit: null,    // { tick, box, finish } – otevřené okénko pro tempo
+    autoDrag: null,     // tažení bodu křivky hlasitosti
+    autoHover: null,    // bod křivky pod myší
+    autoH: 0,           // výška pruhu s křivkou (0 = skrytý)
     touches: new Map(), // aktivní prsty (pinch zoom)
     autoRAF: 0,
     lastLength: PPQ / 4,
@@ -868,13 +871,13 @@
   // pravé tlačítko = smazat · Alt = přesnost na doby
   // ---------------------------------------------------------------------------
 
-  const tempoLabel = (bpm) => `♩ ${bpm}`;
-
-  /** Značky tempa: začátek skladby (index -1) a změny tempa. */
+  /** Značky tempa: začátek skladby (index -1) a změny tempa, i s rampou (from → bpm). */
   function tempoMarks(p) {
-    return [{ tick: 0, bpm: p.bpm, index: -1 }]
-      .concat((p.tempoChanges || []).map((c, index) => ({ tick: c.tick, bpm: c.bpm, index })));
+    return MB.tempoSegments(p).map((s, i) => ({ tick: s.tick, bpm: s.to, from: s.from, ramp: s.ramp, index: i - 1 }));
   }
+
+  /** „♩ 125“, u postupné změny „↗ 170“ / „↘ 90“. */
+  const tempoLabel = (m) => `${m.ramp ? (m.bpm >= m.from ? '↗' : '↘') : '♩'} ${m.bpm}`;
 
   /** Značka pod bodem x pravítka – počítá se i její popisek. Při překryvu vyhrává pozdější. */
   function tempoMarkAt(p, x) {
@@ -884,7 +887,7 @@
     for (const m of tempoMarks(p)) {
       if (m.tick >= MB.songTicks(p)) continue;
       const mx = tickX(m.tick);
-      if (x >= mx - 6 && x <= mx + c.measureText(tempoLabel(m.bpm)).width + 10) hit = m;
+      if (x >= mx - 6 && x <= mx + c.measureText(tempoLabel(m)).width + 10) hit = m;
     }
     return hit;
   }
@@ -947,32 +950,64 @@
     openTempoEditor(clamp(Math.floor(rulerTick(e) / snap) * snap, 0, MB.songTicks(p) - 1));
   }
 
+  /** Volby přechodu na nové tempo: skokem, nebo postupně přes dobu / takty. */
+  function rampOptions(p, current) {
+    const bar = MB.barTicks(p);
+    const opts = [[0, 'skokem'], [PPQ, 'postupně za 1 dobu'], [2 * PPQ, 'postupně za 2 doby'], [bar, 'postupně za 1 takt'],
+      [2 * bar, 'postupně za 2 takty'], [4 * bar, 'postupně za 4 takty'], [8 * bar, 'postupně za 8 taktů'],
+      [16 * bar, 'postupně za 16 taktů']];
+    if (current && !opts.some(([v]) => v === current)) {
+      opts.push([current, `postupně za ${+(current / PPQ).toFixed(2)} dob`]);
+      opts.sort((a, b) => a[0] - b[0]);
+    }
+    return opts;
+  }
+
   /**
-   * Malé pole pro tempo přímo v pravítku. Enter / klik jinam = uložit, Esc = zrušit,
-   * prázdné pole = smazat změnu tempa (hodí se na dotyk, kde není pravé tlačítko).
+   * Malé okénko pro tempo přímo v pravítku: číslo + jak rychle se na něj přejde.
+   * Enter / klik jinam = uložit, Esc = zrušit, prázdné číslo = smazat změnu tempa
+   * (hodí se na dotyk, kde není pravé tlačítko).
    */
   function openTempoEditor(tick) {
     if (G.tempoEdit) G.tempoEdit.finish(true);
     const p = State.project;
+    const existing = (p.tempoChanges || []).find((c) => c.tick === tick);
+    const box = document.createElement('div');
+    box.className = 'tempo-edit';
     const input = document.createElement('input');
     input.type = 'number';
     input.min = MB.BPM_MIN;
     input.max = MB.BPM_MAX;
     input.step = 1;
-    input.className = 'tempo-edit';
-    input.value = MB.bpmAt(p, tick);
+    input.value = existing ? existing.bpm : Math.round(MB.bpmAt(p, tick));
     input.title = 'Tempo od tohoto místa · Enter = uložit · Esc = zrušit · prázdné = smazat změnu';
+    box.appendChild(input);
+    let select = null;
+    if (tick > 0) { // u začátku skladby není z čeho přecházet
+      select = document.createElement('select');
+      select.title = 'Skokem, nebo postupné zrychlení / zpomalení od této značky';
+      for (const [value, label] of rampOptions(p, existing && existing.ramp)) {
+        const o = document.createElement('option');
+        o.value = value;
+        o.textContent = label;
+        select.appendChild(o);
+      }
+      select.value = String((existing && existing.ramp) || 0);
+      box.appendChild(select);
+    }
     const r = G.els.ruler.getBoundingClientRect();
-    input.style.left = `${Math.round(r.left + clamp(tickX(tick), 0, Math.max(0, G.viewW - 72)))}px`;
-    input.style.top = `${Math.round(r.top)}px`;
+    const width = select ? 210 : 70;
+    box.style.left = `${Math.round(r.left + clamp(tickX(tick), 0, Math.max(0, G.viewW - width)))}px`;
+    box.style.top = `${Math.round(r.top)}px`;
+
     let done = false;
-    // klik kamkoliv jinam pole uloží a zavře (mřížka si fokus nebere, takže blur nepřijde)
-    const outside = (e) => { if (e.target !== input) finish(true); };
+    // klik kamkoliv jinam okénko uloží a zavře (mřížka si fokus nebere, takže blur nepřijde)
+    const outside = (e) => { if (!box.contains(e.target)) finish(true); };
     const finish = (save) => {
       if (done) return;
       done = true;
       document.removeEventListener('pointerdown', outside, true);
-      input.remove();
+      box.remove();
       G.tempoEdit = null;
       G.dirty = true;
       if (!save) return;
@@ -985,26 +1020,52 @@
       }
       if (!Number.isFinite(+raw)) return;
       const bpm = clamp(Math.round(+raw), MB.BPM_MIN, MB.BPM_MAX);
-      State.change((pp) => MB.setTempoChange(pp, tick, bpm), 'project');
+      const ramp = select ? +select.value : 0;
+      State.change((pp) => MB.setTempoChange(pp, tick, bpm, ramp), 'project');
     };
-    input.addEventListener('keydown', (e) => {
+    box.addEventListener('keydown', (e) => {
       e.stopPropagation(); // mezerník, Delete… teď nejsou zkratky aplikace
       if (e.key === 'Enter') finish(true);
       else if (e.key === 'Escape') finish(false);
     });
-    input.addEventListener('blur', () => finish(true));
     document.addEventListener('pointerdown', outside, true);
-    document.body.appendChild(input);
-    G.tempoEdit = { tick, input, finish };
+    document.body.appendChild(box);
+    G.tempoEdit = { tick, box, finish };
     G.dirty = true;
     input.focus();
     input.select();
   }
 
+  /** Pruh tempa: průběh tempa jako čára (skok = schod, postupná změna = šikmý náběh) a značky. */
   function renderTempoLane(p, c, W) {
     const songEnd = MB.songTicks(p);
     c.fillStyle = '#0e1219';
     c.fillRect(0, 0, W, TEMPO_H);
+    const segs = MB.tempoSegments(p).filter((s) => s.tick < songEnd);
+
+    // čára tempa: nahoře nejrychlejší, dole nejpomalejší tempo skladby
+    const all = segs.flatMap((s) => [s.from, s.to]);
+    const lo = Math.min(...all);
+    const hi = Math.max(...all);
+    const yOf = (bpm) => (hi - lo < 1 ? TEMPO_H / 2 : TEMPO_H - 4 - ((bpm - lo) / (hi - lo)) * (TEMPO_H - 8));
+    c.beginPath();
+    c.moveTo(tickX(0), yOf(p.bpm));
+    for (const s of segs) {
+      c.lineTo(tickX(s.tick), yOf(s.from));
+      if (s.ramp) c.lineTo(tickX(Math.min(songEnd, s.tick + s.ramp)), yOf(s.to));
+      else c.lineTo(tickX(s.tick), yOf(s.to));
+    }
+    c.lineTo(tickX(songEnd), yOf(segs[segs.length - 1].to));
+    c.strokeStyle = 'rgba(252, 196, 25, 0.55)';
+    c.lineWidth = 1.5;
+    c.stroke();
+    c.lineTo(tickX(songEnd), TEMPO_H);
+    c.lineTo(tickX(0), TEMPO_H);
+    c.closePath();
+    c.fillStyle = 'rgba(252, 196, 25, 0.08)';
+    c.fill();
+
+    // značky a popisky
     c.font = TEMPO_FONT;
     c.textBaseline = 'middle';
     const marks = tempoMarks(p).filter((m) => m.tick < songEnd);
@@ -1012,34 +1073,205 @@
       marks.push({ tick: G.tempoEdit.tick, bpm: null, index: null });
       marks.sort((a, b) => a.tick - b.tick);
     }
-    const y = TEMPO_H / 2 + 1;
     for (let i = 0; i < marks.length; i++) {
       const m = marks[i];
       const x = tickX(m.tick);
       const nextX = tickX(i + 1 < marks.length ? marks[i + 1].tick : songEnd);
       if (nextX < 0 || x > W) continue;
-      // úseky se střídají v odstínu, ať je vidět, kde které tempo platí
-      if (marks.length > 1) {
-        c.fillStyle = i % 2 ? 'rgba(252, 196, 25, 0.08)' : 'rgba(252, 196, 25, 0.025)';
-        c.fillRect(x, 0, nextX - x, TEMPO_H);
-      }
       const hover = G.tempoHover === m.tick;
       c.fillStyle = m.index === -1 ? 'rgba(252, 196, 25, 0.45)' : COL.tempo;
       c.fillRect(Math.round(x), 0, hover ? 3 : 2, TEMPO_H);
-      if (m.bpm == null) continue; // popisek zakrývá pole pro zadání
-      const label = tempoLabel(m.bpm);
+      if (m.bpm == null) continue; // popisek zakrývá okénko pro zadání
+      const label = tempoLabel(m);
       const w = c.measureText(label).width;
-      if (nextX - x > w + 10 || i === marks.length - 1) {
+      if (nextX - x > w + 12 || i === marks.length - 1) {
         const lx = Math.max(x + 5, 4);
+        c.fillStyle = 'rgba(14, 18, 25, 0.8)'; // podklad, ať je popisek čitelný přes čáru tempa
+        c.fillRect(lx - 2, 3, w + 4, TEMPO_H - 6);
         c.fillStyle = hover ? '#fff3bf' : m.index === -1 ? '#c9cfdc' : '#ffe066';
-        c.fillText(label, lx, y);
+        c.fillText(label, lx, TEMPO_H / 2 + 1);
         if (marks.length === 1) { // nápověda, dokud žádná změna tempa není
           c.fillStyle = 'rgba(201, 207, 220, 0.32)';
-          c.fillText('klikni sem = změna tempa od taktu', lx + w + 14, y);
+          c.fillText('klikni sem = změna tempa od taktu (i postupná)', lx + w + 14, TEMPO_H / 2 + 1);
         }
       }
     }
     hline(c, TEMPO_H, W, '#1f2533');
+  }
+
+  // ---------------------------------------------------------------------------
+  // Křivka hlasitosti stopy (pruh pod mřížkou)
+  // klik = nový bod (a hned jde táhnout) · tah bodu = posun · pravé tlačítko = smazat ·
+  // Alt = bez přichytávání k mřížce
+  // ---------------------------------------------------------------------------
+
+  const AUTO_PAD = 7; // svislý okraj, ať jdou chytit body na 0 % i 100 %
+  const autoH = () => G.autoH; // výška pruhu – spočítá ji layout()
+  const autoY = (v) => AUTO_PAD + (1 - v) * (autoH() - 2 * AUTO_PAD);
+  const autoValue = (y) => clamp(1 - (y - AUTO_PAD) / Math.max(1, autoH() - 2 * AUTO_PAD), 0, 1);
+  const autoPoints = () => track().volumeAuto || [];
+
+  /** Bod křivky pod myší (do 8 px). */
+  function autoPointAt(x, y) {
+    let best = null;
+    let bestD = 8;
+    for (const pt of autoPoints()) {
+      const d = Math.hypot(tickX(pt.tick) - x, autoY(pt.value) - y);
+      if (d <= bestD) {
+        best = pt;
+        bestD = d;
+      }
+    }
+    return best;
+  }
+
+  function autoTick(x, alt) {
+    const p = State.project;
+    const t = xTick(x);
+    const snap = MB.stepTicks(p);
+    return clamp(alt ? Math.round(t) : Math.round(t / snap) * snap, 0, MB.songTicks(p));
+  }
+
+  function onAutoDown(e) {
+    e.preventDefault();
+    if (G.tempoEdit) G.tempoEdit.finish(true);
+    syncScroll();
+    const { x, y } = localPoint(e, G.els.auto);
+    const hit = autoPointAt(x, y);
+    if (e.button === 2) { // pravé tlačítko = smazat bod
+      if (hit) {
+        State.change(() => {
+          const t = track();
+          t.volumeAuto = t.volumeAuto.filter((pt) => pt !== hit);
+        }, 'notes');
+      }
+      return;
+    }
+    capture(G.els.auto, e);
+    State.beginGesture();
+    // klik vedle bodu = nový bod na tomto místě, který jde rovnou táhnout
+    const pt = hit || MB.setAutoPoint(track(), autoTick(x, e.altKey), autoValue(y));
+    G.autoDrag = { pt, dx: hit ? tickX(hit.tick) - x : 0, dy: hit ? autoY(hit.value) - y : 0 };
+    G.autoHover = pt;
+    State.changed('notes');
+  }
+
+  function onAutoMove(e) {
+    syncScroll();
+    const { x, y } = localPoint(e, G.els.auto);
+    const ad = G.autoDrag;
+    if (!ad) {
+      const hit = autoPointAt(x, y);
+      G.els.auto.style.cursor = hit ? 'grab' : 'crosshair';
+      if (hit !== G.autoHover) {
+        G.autoHover = hit;
+        G.dirty = true;
+      }
+      return;
+    }
+    const t = track();
+    const tick = autoTick(x + ad.dx, e.altKey);
+    // na místo jiného bodu se netáhne (časová pozice zůstane)
+    if (!t.volumeAuto.some((pt) => pt !== ad.pt && pt.tick === tick)) ad.pt.tick = tick;
+    ad.pt.value = Math.round(autoValue(y + ad.dy) * 100) / 100;
+    t.volumeAuto.sort((a, b) => a.tick - b.tick);
+    State.changed('notes');
+  }
+
+  function onAutoUp() {
+    if (!G.autoDrag) return;
+    G.autoDrag = null;
+    State.endGesture('notes');
+  }
+
+  function renderAuto(p) {
+    const H = autoH();
+    if (!H || !G.actx) return;
+    const c = G.actx;
+    const W = G.viewW;
+    c.setTransform(G.dpr, 0, 0, G.dpr, 0, 0);
+    c.fillStyle = '#0e1219';
+    c.fillRect(0, 0, W, H);
+    const songEnd = MB.songTicks(p);
+    const barT = MB.barTicks(p);
+    const t = track();
+
+    // takty a doby, vodorovně 0 / 50 / 100 %
+    const tA = Math.max(0, xTick(0));
+    const tB = Math.min(songEnd, xTick(W));
+    for (let b = Math.floor(tA / barT); b * barT <= tB; b++) {
+      vline(c, tickX(b * barT), H, 'rgba(255, 255, 255, 0.12)');
+      if (G.beatW >= 10) {
+        for (let k = 1; k < p.beatsPerBar; k++) vline(c, tickX(b * barT + k * PPQ), H, 'rgba(255, 255, 255, 0.04)');
+      }
+    }
+    for (const v of [0, 0.5, 1]) {
+      c.fillStyle = 'rgba(255, 255, 255, 0.06)';
+      c.fillRect(0, Math.round(autoY(v)), W, 1);
+    }
+
+    // křivka
+    const pts = t.volumeAuto || [];
+    const color = t.color || '#8ab4f8';
+    const x0 = tickX(0);
+    const xe = tickX(songEnd);
+    c.beginPath();
+    if (!pts.length) {
+      c.moveTo(x0, autoY(1));
+      c.lineTo(xe, autoY(1));
+    } else {
+      c.moveTo(x0, autoY(pts[0].value));
+      for (const pt of pts) c.lineTo(tickX(pt.tick), autoY(pt.value));
+      c.lineTo(xe, autoY(pts[pts.length - 1].value));
+    }
+    c.strokeStyle = pts.length ? color : 'rgba(201, 207, 220, 0.35)';
+    c.lineWidth = 1.5;
+    if (!pts.length) c.setLineDash([4, 4]);
+    c.stroke();
+    c.setLineDash([]);
+    if (pts.length) {
+      c.lineTo(xe, H);
+      c.lineTo(x0, H);
+      c.closePath();
+      c.fillStyle = rgba(color, 0.14);
+      c.fill();
+    }
+    for (const pt of pts) {
+      const x = tickX(pt.tick);
+      if (x < -8 || x > W + 8) continue;
+      const hot = pt === G.autoHover || (G.autoDrag && G.autoDrag.pt === pt);
+      c.beginPath();
+      c.arc(x, autoY(pt.value), hot ? 5.5 : 4, 0, Math.PI * 2);
+      c.fillStyle = hot ? '#fff' : color;
+      c.fill();
+      c.strokeStyle = '#0e1219';
+      c.lineWidth = 1.5;
+      c.stroke();
+    }
+    c.font = TEMPO_FONT;
+    c.textBaseline = 'middle';
+    const shown = (G.autoDrag && G.autoDrag.pt) || G.autoHover;
+    if (shown && pts.includes(shown)) { // hodnota bodu, který se táhne / je pod myší
+      const label = `${Math.round(shown.value * 100)} %`;
+      const x = clamp(tickX(shown.tick) + 9, 2, W - 40);
+      const y = clamp(autoY(shown.value) - 10, 8, H - 8);
+      c.fillStyle = 'rgba(14, 18, 25, 0.85)';
+      c.fillRect(x - 3, y - 7, c.measureText(label).width + 6, 14);
+      c.fillStyle = '#fff';
+      c.fillText(label, x, y);
+    } else if (!pts.length) {
+      c.fillStyle = 'rgba(201, 207, 220, 0.4)';
+      c.fillText('Hlasitost stopy je celou dobu 100 %. Klikni = bod křivky, tah = posun, pravé tlačítko = smazat.', 8, autoY(1) + 12);
+    }
+
+    // konec skladby a přehrávací kurzor
+    if (xe < W) {
+      c.fillStyle = 'rgba(0, 0, 0, 0.45)';
+      c.fillRect(Math.max(0, xe), 0, W, H);
+    }
+    const px = tickX(G.playTick);
+    if (px >= 0 && px <= W) vline(c, px, H, COL.playhead);
+    hline(c, 1, W, '#262c3a');
   }
 
   function resetLoop() {
@@ -1081,6 +1313,10 @@
     updateSpacer();
     sizeCanvas(canvas, G.viewW, G.viewH);
     sizeCanvas(ruler, G.viewW, RULER_H);
+    if (G.els.auto) { // pruh křivky = co v editoru zbude pod pravítkem a mřížkou (0, když je skrytý)
+      G.autoH = Math.max(0, editor.clientHeight - RULER_H - G.els.wrap.clientHeight);
+      sizeCanvas(G.els.auto, G.viewW, G.autoH);
+    }
     sizeCanvas(keys, kw, G.viewH);
     syncScroll();
     render(); // změna velikosti canvas vymaže – překreslíme hned, ať nic nebliká
@@ -1193,6 +1429,7 @@
     renderGrid(p);
     renderRuler(p);
     renderKeys(p);
+    renderAuto(p);
     G.dirty = false;
   }
 
@@ -1745,6 +1982,7 @@
     G.gctx = els.canvas.getContext('2d');
     G.rctx = els.ruler.getContext('2d');
     G.kctx = els.keys.getContext('2d');
+    G.actx = els.auto ? els.auto.getContext('2d') : null;
 
     const s = els.scroll;
     s.addEventListener('pointerdown', onDown);
@@ -1794,6 +2032,26 @@
       e.preventDefault();
       s.scrollLeft += (e.deltaMode === 1 ? 33 : 1) * (Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY);
     }, { passive: false });
+
+    const a = els.auto;
+    if (a) {
+      a.addEventListener('pointerdown', onAutoDown);
+      a.addEventListener('pointermove', onAutoMove);
+      a.addEventListener('pointerup', onAutoUp);
+      a.addEventListener('pointercancel', onAutoUp);
+      a.addEventListener('pointerleave', () => {
+        if (G.autoHover && !G.autoDrag) {
+          G.autoHover = null;
+          G.dirty = true;
+        }
+      });
+      a.addEventListener('contextmenu', (e) => e.preventDefault());
+      a.addEventListener('wheel', (e) => {
+        if (e.ctrlKey || e.metaKey) return onWheel(e);
+        e.preventDefault();
+        s.scrollLeft += (e.deltaMode === 1 ? 33 : 1) * (Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY);
+      }, { passive: false });
+    }
 
     new ResizeObserver(layout).observe(els.wrap);
     window.addEventListener('resize', layout); // změna devicePixelRatio (zoom prohlížeče)

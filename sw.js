@@ -3,7 +3,7 @@
  * Strategie „nejdřív síť“: s internetem se vždy načte nejnovější verze
  * (a uloží do mezipaměti), bez internetu se použije uložená kopie.
  */
-const CACHE = 'makerbeater-v4';
+const CACHE = 'makerbeater-v5';
 const FILES = [
   './',
   'index.html',

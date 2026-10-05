@@ -277,6 +277,112 @@
     return `8 úderů (120 → 240 BPM), největší odchylka rozestupu ${(err * 1000).toFixed(2)} ms, délka ${(buf.length / sr).toFixed(2)} s`;
   });
 
+  test('Postupné zrychlení: přesný čas v rampě a plynule kratší rozestupy', () => {
+    const p = sixteenthProject({ bars: 4, bpm: 120, loop: false });
+    const bar = MB.barTicks(p);
+    MB.setTempoChange(p, bar, 180, 2 * bar); // od 2. taktu za 2 takty ze 120 na 180 BPM
+    // rampa 2 takty = 8 dob: ∫ = 8 · 60 / (180 − 120) · ln(180 / 120) s
+    const rampSec = MB.tickToSec(p, 3 * bar) - MB.tickToSec(p, bar);
+    const exact = ((8 * 60) / 60) * Math.log(1.5);
+    assert(Math.abs(rampSec - exact) < 1e-9, `rampa trvá ${rampSec} s místo ${exact} s`);
+    assert(MB.bpmAt(p, 2 * bar) === 150, `v půlce rampy ${MB.bpmAt(p, 2 * bar)} BPM`);
+    let detail = '';
+    withFakeClock(p, (clock, log) => {
+      MB.Transport.play();
+      runClock(clock, 12, rng(6));
+      log.sort((a, b) => a.time - b.time);
+      assert(log.length === 64, `čekal 64 not, zaznělo ${log.length}`);
+      let maxErr = 0;
+      log.forEach((e) => {
+        const i = e.pitch - 40;
+        maxErr = Math.max(maxErr, Math.abs(e.time - (0.05 + MB.tickToSec(p, i * (PPQ / 4)))));
+      });
+      assert(maxErr < 1e-9, `nota mimo čas o ${maxErr} s`);
+      const iv = intervals(log);
+      for (let i = 17; i < 47; i++) assert(iv[i] < iv[i - 1], `v rampě se rozestup nezkrátil (nota ${i})`);
+      assert(Math.abs(iv[2] - 0.125) < 1e-9 && Math.abs(iv[60] - 60 / 180 / 4) < 1e-9, 'tempo před / za rampou');
+      detail = `rampa 120 → 180 BPM za 2 takty trvá ${rampSec.toFixed(4)} s, 64 not, max chyba ${maxErr.toExponential(1)} s`;
+    });
+    return detail;
+  });
+
+  test('Křivka hlasitosti: hodnoty, úpravy a kontrola importu', () => {
+    const t = MB.createTrack('pad');
+    assert(MB.autoValueAt(t.volumeAuto, 500) === 1, 'bez bodů má být 100 %');
+    MB.setAutoRamp(t, 384, 768, 0, 1);
+    const v = (tick) => MB.autoValueAt(t.volumeAuto, tick);
+    assert(v(0) === 0 && v(576) === 0.5 && v(768) === 1 && v(5000) === 1, `náběh: ${v(0)} ${v(576)} ${v(768)} ${v(5000)}`);
+    MB.setAutoPoint(t, 576, 0.8);
+    assert(t.volumeAuto.length === 3 && v(576) === 0.8, 'vložený bod');
+    MB.setAutoRamp(t, 500, 700, 1, 0.2); // přepíše body uvnitř úseku
+    assert(t.volumeAuto.map((pt) => pt.tick).join() === '384,500,700,768', `body po doznění: ${JSON.stringify(t.volumeAuto)}`);
+
+    const p = MB.normalizeProject({
+      tracks: [{ instrument: 'pad', volumeAuto: [{ tick: 96, value: 2 }, { tick: 0, value: 0.333 }, { tick: 96, value: 0.5 }, { tick: -1, value: 1 }, null, { tick: 'x' }] }],
+      tempoChanges: [{ tick: 384, bpm: 150, ramp: 768 }, { tick: 1536, bpm: 90, ramp: -5 }],
+    });
+    const auto = JSON.stringify(p.tracks[0].volumeAuto);
+    assert(auto === JSON.stringify([{ tick: 0, value: 0.33 }, { tick: 96, value: 0.5 }]), `import křivky: ${auto}`);
+    const tempo = JSON.stringify(p.tempoChanges);
+    assert(tempo === JSON.stringify([{ tick: 384, bpm: 150, ramp: 768 }, { tick: 1536, bpm: 90 }]), `import ramp tempa: ${tempo}`);
+    return 'náběh 0 → 100 %, vložení bodu, doznění přepíše body v úseku, import ořízne a seřadí';
+  });
+
+  test('Export: křivka hlasitosti – stopa plynule zesílí', async () => {
+    const p = MB.createProject({ bpm: 120, bars: 2, loop: false });
+    const t = MB.createTrack('organ');
+    t.reverb = 0;
+    t.notes.push(MB.createNote(60, 0, 2 * MB.barTicks(p), 0.8)); // tón přes celé 4 s
+    MB.setAutoRamp(t, 0, 2 * MB.barTicks(p), 0, 1);              // náběh z ticha na 100 %
+    p.tracks.push(t);
+    const sr = 22050;
+    const buf = await MB.renderProject(p, { sampleRate: sr, tail: 0.2 });
+    const d = buf.getChannelData(0);
+    const rms = (a, b) => {
+      let s = 0;
+      for (let i = Math.floor(a * sr); i < Math.floor(b * sr); i++) s += d[i] * d[i];
+      return Math.sqrt(s / ((b - a) * sr));
+    };
+    const levels = [0.5, 1.5, 2.5, 3.5].map((s) => rms(s - 0.2, s + 0.2));
+    for (let i = 1; i < levels.length; i++) assert(levels[i] > levels[i - 1] * 1.25, `hlasitost neroste: ${levels.map((l) => l.toFixed(3))}`);
+    // lineární křivka: v 1/4 délky má být zhruba čtvrtinová hlasitost proti 3/4
+    const ratio = levels[0] / levels[2];
+    assert(ratio > 0.1 && ratio < 0.3, `poměr hlasitostí ${ratio.toFixed(2)} (čekal ≈ 0,2)`);
+    return `RMS po sekundách: ${levels.map((l) => l.toFixed(3)).join(' → ')}`;
+  });
+
+  test('Živě: křivka hlasitosti se plánuje i při přehrávání', async () => {
+    const E = MB.Engine, T = MB.Transport;
+    const ctx = E.ensure();
+    if (ctx.state !== 'running') await ctx.resume();
+    E.setMasterVolume(document.getElementById('loud').checked ? 0.8 : 0);
+    const p = MB.createProject({ bpm: 240, bars: 2, loop: false }); // 1 takt = 1 s
+    const t = MB.createTrack('organ');
+    MB.setAutoRamp(t, 0, MB.barTicks(p), 0, 1);
+    p.tracks.push(t);
+    const saved = MB.State.project;
+    MB.State.project = p;
+    const samples = [];
+    try {
+      T.position = 0;
+      T.play();
+      const strip = E.strips.get(t.id);
+      const start = T.anchors[0].time;
+      for (const at of [0.25, 0.5, 0.75, 1.3]) {
+        while (ctx.currentTime < start + at) await sleep(10);
+        samples.push([ctx.currentTime - start, strip.auto.gain.value]);
+      }
+    } finally {
+      T.stop();
+      MB.State.project = saved;
+    }
+    for (const [time, value] of samples) {
+      const expected = Math.min(1, time);
+      assert(Math.abs(value - expected) < 0.12, `v ${time.toFixed(2)} s je hlasitost ${value.toFixed(2)}, čekal ≈ ${expected.toFixed(2)}`);
+    }
+    return samples.map(([time, value]) => `${time.toFixed(2)} s → ${Math.round(value * 100)} %`).join(', ');
+  });
+
   // ===========================================================================
   // Offline render – začíná nota opravdu v naplánovaném vzorku?
   // ===========================================================================
