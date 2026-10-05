@@ -36,7 +36,7 @@
 
     <!-- Skladba -->
     <div class="group">
-      <label class="field" title="Tempo (doby za minutu)"><span>BPM</span><input id="inpBpm" type="number" min="30" max="300" step="1"></label>
+      <label class="field" title="Tempo (doby za minutu) v úseku pod kurzorem. Změny tempa po úsecích přidáš v horním pruhu pravítka."><span>BPM</span><input id="inpBpm" type="number" min="30" max="300" step="1"></label>
       <label class="field" title="Délka skladby v taktech"><span>Takty</span><input id="inpBars" type="number" min="1" max="128" step="1"></label>
       <select id="selMeter" title="Doby v taktu">
         <option value="2">2/4</option>
@@ -160,7 +160,7 @@
 
     <section class="editor" id="editor">
       <div class="corner" id="corner"></div>
-      <canvas id="rulerCanvas" title="Klik = skok · tah = oblast smyčky · dvojklik = smyčka přes celou skladbu"></canvas>
+      <canvas id="rulerCanvas" title="Horní pruh – tempo: klik = změna tempa od taktu · tah značky = posun · pravé tlačítko = smazat&#10;Takty: klik = skok · tah = oblast smyčky · dvojklik = smyčka přes celou skladbu"></canvas>
       <canvas id="keysCanvas"></canvas>
       <div class="grid-wrap" id="gridWrap">
         <canvas id="gridCanvas"></canvas>
@@ -231,6 +231,7 @@
         <dl>
           <dt>Klávesy vlevo</dt><dd>klik = zahraje tón, tažením glissando</dd>
           <dt>Pravítko</dt><dd>klik = skok · tah = oblast smyčky · dvojklik = celá skladba</dd>
+          <dt>Tempo po úsecích</dt><dd>horní pruh pravítka: klik = změna tempa od taktu · tah = posun (Alt = po dobách) · pravé tlačítko nebo prázdné pole = smazat · pole BPM mění tempo úseku pod kurzorem</dd>
           <dt>Stopa</dt><dd>dvojklik na jméno = přejmenovat · dvojklik na posuvník = výchozí hodnota</dd>
           <dt>Sidechain</dt><dd>stopa se při každém kopáku na chvíli ztiší („pumpování“ jako v house)</dd>
           <dt>Ladění</dt><dd>u bicích: vyber údery a posuvníkem dole je přelaď (breakcore rolly)</dd>

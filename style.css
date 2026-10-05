@@ -549,7 +549,7 @@ dialog.help::backdrop { background: rgba(5, 7, 10, 0.6); backdrop-filter: blur(2
   min-height: 0;
   display: grid;
   grid-template-columns: var(--keys-w, 64px) minmax(0, 1fr);
-  grid-template-rows: 30px minmax(0, 1fr);
+  grid-template-rows: 48px minmax(0, 1fr); /* pravítko: pruh tempa 18 px + takty 30 px */
   background: #0b0d12;
 }
 
@@ -557,9 +557,7 @@ dialog.help::backdrop { background: rgba(5, 7, 10, 0.6); backdrop-filter: blur(2
   grid-row: 1;
   grid-column: 1;
   display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 0 8px;
+  flex-direction: column;
   overflow: hidden;
   background: #121620;
   border-right: 1px solid var(--border);
@@ -568,8 +566,36 @@ dialog.help::backdrop { background: rgba(5, 7, 10, 0.6); backdrop-filter: blur(2
   font-size: 11px;
   font-weight: 600;
 }
+.corner-tempo {
+  height: 18px;
+  flex: none;
+  display: flex;
+  align-items: center;
+  padding: 0 8px;
+  border-bottom: 1px solid #1f2533;
+  background: #0e1219;
+  color: #b0975a;
+  font-size: 10px;
+}
+.corner-track { flex: 1; min-height: 0; display: flex; align-items: center; gap: 6px; padding: 0 8px; }
 .corner .dot { width: 8px; height: 8px; flex: none; border-radius: 50%; background: var(--track-color); }
-.corner span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.corner-track span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* pole pro zadání tempa přímo v pravítku */
+.tempo-edit {
+  position: fixed;
+  z-index: 60;
+  width: 64px;
+  height: 18px;
+  padding: 0 4px;
+  border: 1px solid #fcc419;
+  border-radius: 4px;
+  background: #0d0f14;
+  color: #ffe066;
+  font: 600 11px var(--font);
+  outline: none;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.5);
+}
 
 #rulerCanvas {
   grid-row: 1;

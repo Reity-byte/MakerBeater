@@ -64,7 +64,72 @@
   const songTicks = (p) => p.bars * p.beatsPerBar * PPQ;
   const stepTicks = (p) => PPQ / p.stepsPerBeat;
   const barTicks = (p) => p.beatsPerBar * PPQ;
-  const secPerTick = (p) => 60 / p.bpm / PPQ;
+
+  // ---------------------------------------------------------------------------
+  // Tempo: `p.bpm` platí od začátku, `p.tempoChanges` = [{ tick, bpm }] mění tempo
+  // od daného místa dál (seřazené podle ticku, tick > 0). Převod pozice na sekundy
+  // se proto počítá po úsecích se stejným tempem.
+  // ---------------------------------------------------------------------------
+  const BPM_MIN = 30;
+  const BPM_MAX = 300;
+  const tempoList = (p) => p.tempoChanges || [];
+
+  /** Index změny tempa, která platí v místě `tick` (-1 = základní tempo od začátku). */
+  function tempoIndexAt(p, tick) {
+    const list = tempoList(p);
+    let i = -1;
+    while (i + 1 < list.length && list[i + 1].tick <= tick) i++;
+    return i;
+  }
+
+  const bpmAt = (p, tick) => {
+    const i = tempoIndexAt(p, tick);
+    return i < 0 ? p.bpm : tempoList(p)[i].bpm;
+  };
+  const secPerTick = (p, tick = 0) => 60 / bpmAt(p, tick) / PPQ;
+
+  /** Tick nejbližší změny tempa za `tick` (Infinity = už žádná). */
+  function nextTempoChange(p, tick) {
+    for (const c of tempoList(p)) if (c.tick > tick) return c.tick;
+    return Infinity;
+  }
+
+  /** Pozice v ticích → čas v sekundách od začátku skladby. */
+  function tickToSec(p, tick) {
+    let sec = 0;
+    let from = 0;
+    let bpm = p.bpm;
+    for (const c of tempoList(p)) {
+      if (c.tick >= tick) break;
+      sec += ((c.tick - from) * 60) / bpm / PPQ;
+      from = c.tick;
+      bpm = c.bpm;
+    }
+    return sec + ((tick - from) * 60) / bpm / PPQ;
+  }
+
+  /** Nastaví tempo úseku, ve kterém leží `tick` (začátek skladby = základní tempo). */
+  function setTempoAt(p, tick, bpm) {
+    const i = tempoIndexAt(p, tick);
+    if (i < 0) p.bpm = bpm;
+    else p.tempoChanges[i].bpm = bpm;
+  }
+
+  /**
+   * Změna tempa od `tick` dál (už existující na stejném místě se jen přepíše).
+   * Nová změna na stejné tempo, jaké už v tom místě platí, se nepřidá – nic by neměnila.
+   */
+  function setTempoChange(p, tick, bpm) {
+    if (tick <= 0) {
+      p.bpm = bpm;
+      return;
+    }
+    if (!p.tempoChanges) p.tempoChanges = [];
+    const existing = p.tempoChanges.find((c) => c.tick === tick);
+    if (existing) existing.bpm = bpm;
+    else if (bpmAt(p, tick) !== bpm) p.tempoChanges.push({ tick, bpm });
+    p.tempoChanges.sort((x, y) => x.tick - y.tick);
+  }
 
   // ---------------------------------------------------------------------------
   // Stupnice
@@ -165,6 +230,7 @@
       loop: true,
       loopStart: 0,
       loopEnd: null,
+      tempoChanges: [], // změny tempa po úsecích: [{ tick, bpm }]
       tracks: [],
     }, opts);
   }
@@ -419,7 +485,7 @@
     }
     const p = createProject();
     p.name = text(raw.name, 80, p.name);
-    p.bpm = int(raw.bpm, 30, 300, 120);
+    p.bpm = int(raw.bpm, BPM_MIN, BPM_MAX, 120);
     p.bars = int(raw.bars, 1, 128, 8);
     p.beatsPerBar = int(raw.beatsPerBar, 2, 7, 4);
     p.stepsPerBeat = STEP_OPTIONS.includes(raw.stepsPerBeat) ? raw.stepsPerBeat : 4;
@@ -430,6 +496,15 @@
     const end = songTicks(p);
     p.loopStart = int(raw.loopStart, 0, end, 0);
     p.loopEnd = raw.loopEnd == null ? null : int(raw.loopEnd, 0, end, end);
+    // změny tempa: platná čísla, seřazené, na jednom místě nejvýš jedna
+    const tempos = new Map();
+    for (const c of Array.isArray(raw.tempoChanges) ? raw.tempoChanges.slice(0, 512) : []) {
+      if (!c || typeof c !== 'object') continue;
+      const tick = Math.round(Number(c.tick));
+      if (!Number.isFinite(tick) || tick <= 0 || tick > 128 * 7 * PPQ) continue;
+      tempos.set(tick, int(c.bpm, BPM_MIN, BPM_MAX, p.bpm));
+    }
+    p.tempoChanges = [...tempos].sort((x, y) => x[0] - y[0]).map(([tick, bpm]) => ({ tick, bpm }));
 
     const trackIds = new Set();
     for (const rt of raw.tracks.slice(0, 64)) {
@@ -746,6 +821,7 @@
     on, emit,
     clamp, uid, pitchClass, noteName, isBlackKey,
     songTicks, stepTicks, barTicks, secPerTick, loopRange,
+    BPM_MIN, BPM_MAX, bpmAt, tempoIndexAt, nextTempoChange, tickToSec, setTempoAt, setTempoChange,
     scaleSteps, inScale, isRoot, scaleActive, snapActive, snapToScale, scaleIndex, scaleIndexToPitch, transposeInScale,
     createNote, createTrack, createProject, createEmptyProject, createDemoProject, createHouseProject,
     createBreakcoreProject, cloneTrack, uniqueTrackName, chopNotes, STEP_OPTIONS,

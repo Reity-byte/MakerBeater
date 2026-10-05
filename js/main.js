@@ -143,8 +143,25 @@
       else e.target.value = v;
     });
   }
-  bindNumber('inpBpm', 'bpm', 30, 300, 120);
   bindNumber('inpBars', 'bars', 1, 128, 8);
+
+  // Tempo: pole BPM ukazuje a mění tempo úseku, ve kterém je kurzor přehrávání
+  // (bez změn tempa v pravítku je to tempo celé skladby).
+  const cursorTick = () => clamp(Transport.currentTick(), 0, MB.songTicks(State.project) - 1);
+  $('inpBpm').addEventListener('change', (e) => {
+    const tick = cursorTick();
+    const v = clamp(Math.round(+e.target.value) || MB.bpmAt(State.project, tick), MB.BPM_MIN, MB.BPM_MAX);
+    if (v !== MB.bpmAt(State.project, tick)) State.change((p) => MB.setTempoAt(p, tick, v), 'project');
+    else e.target.value = v;
+  });
+
+  let shownBpm = null;
+  function syncBpm() {
+    const bpm = MB.bpmAt(State.project, cursorTick());
+    if (bpm === shownBpm || document.activeElement === $('inpBpm')) return;
+    shownBpm = bpm;
+    $('inpBpm').value = bpm;
+  }
 
   $('selMeter').addEventListener('change', (e) => {
     State.change((p) => { p.beatsPerBar = +e.target.value; }, 'project');
@@ -228,7 +245,8 @@
 
   function syncToolbar() {
     const p = State.project;
-    if (document.activeElement !== $('inpBpm')) $('inpBpm').value = p.bpm;
+    shownBpm = null;
+    syncBpm();
     if (document.activeElement !== $('inpBars')) $('inpBars').value = p.bars;
     $('selMeter').value = String(p.beatsPerBar);
     $('selStep').value = String(p.stepsPerBeat);
@@ -741,8 +759,8 @@
     const t = State.currentTrack();
     const corner = $('corner');
     corner.style.setProperty('--track-color', t.color);
-    corner.innerHTML = '<span class="dot"></span><span></span>';
-    corner.lastChild.textContent = t.name;
+    corner.innerHTML = '<div class="corner-tempo">♩ Tempo</div><div class="corner-track"><span class="dot"></span><span></span></div>';
+    corner.querySelector('.corner-track').lastChild.textContent = t.name;
     corner.title = `${t.name} – ${MB.getInstrument(t.instrument).name}`;
   }
 
@@ -917,12 +935,13 @@
     Grid.frame();
     const p = State.project;
     const tick = clamp(Transport.currentTick(), 0, MB.songTicks(p) - 1);
-    const pos = `${fmtPosition(tick)}|${fmtTime(tick * MB.secPerTick(p))}`;
+    const pos = `${fmtPosition(tick)}|${fmtTime(MB.tickToSec(p, tick))}`;
     if (pos !== lastPos) {
       lastPos = pos;
       const [a, b] = pos.split('|');
       $('posBar').textContent = a;
       $('posTime').textContent = b;
+      syncBpm(); // kurzor mohl přejít do úseku s jiným tempem
     }
     document.body.classList.toggle('playing', Transport.playing);
     requestAnimationFrame(frame);

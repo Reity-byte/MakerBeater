@@ -189,6 +189,95 @@
   });
 
   // ===========================================================================
+  // Tempo po úsecích
+  // ===========================================================================
+
+  test('Tempo po úsecích: výpočet času, úpravy a kontrola importu', () => {
+    const p = MB.createProject({ bpm: 120, bars: 4 });
+    const bar = MB.barTicks(p);
+    MB.setTempoChange(p, 2 * bar, 60); // od 3. taktu 60 BPM
+    MB.setTempoChange(p, bar, 120);    // stejné tempo, jaké už platí → nepřidá se
+    assert(p.tempoChanges.length === 1, `čekal 1 změnu tempa, je ${p.tempoChanges.length}`);
+    const t4 = MB.tickToSec(p, 3 * bar); // 2 takty po 2 s (120 BPM) + 1 takt po 4 s (60 BPM)
+    assert(Math.abs(t4 - 8) < 1e-9, `4. takt začíná v ${t4} s místo 8 s`);
+    assert(MB.bpmAt(p, 2 * bar - 1) === 120 && MB.bpmAt(p, 2 * bar) === 60, 'tempo na hranici úseku');
+    MB.setTempoAt(p, 3 * bar, 90); // pole BPM s kurzorem ve 4. taktu mění úsek od 3. taktu
+    assert(p.tempoChanges[0].bpm === 90 && p.bpm === 120, 'úprava tempa úseku pod kurzorem');
+    MB.setTempoAt(p, 0, 140);
+    assert(p.bpm === 140 && p.tempoChanges[0].bpm === 90, 'úprava tempa prvního úseku');
+
+    const raw = {
+      bpm: 100,
+      tracks: [{ instrument: 'piano', notes: [] }],
+      tempoChanges: [{ tick: 768, bpm: 999 }, { tick: 384, bpm: 80 }, { tick: 384, bpm: 85 }, { tick: -5, bpm: 90 }, { tick: 'x' }, null],
+    };
+    const n = MB.normalizeProject(raw);
+    const got = JSON.stringify(n.tempoChanges);
+    assert(got === JSON.stringify([{ tick: 384, bpm: 85 }, { tick: 768, bpm: 300 }]), `import změn tempa: ${got}`);
+    const again = MB.normalizeProject(JSON.parse(JSON.stringify(p)));
+    assert(JSON.stringify(again.tempoChanges) === JSON.stringify(p.tempoChanges), 'export → import ztratil změny tempa');
+    return '120 → 60 BPM: 4. takt v 8,000 s · úprava úseku pod kurzorem · import seřadí, ořízne a vyhodí vadné změny';
+  });
+
+  test('Scheduler: tempo po úsecích i se smyčkou – přesně na hranicích', () => {
+    const p = sixteenthProject({ bars: 2, bpm: 120 });
+    MB.setTempoChange(p, MB.barTicks(p), 60); // 1. takt 120 BPM (2 s), 2. takt 60 BPM (4 s)
+    let detail = '';
+    withFakeClock(p, (clock, log) => {
+      MB.Transport.play();
+      runClock(clock, 20, rng(5));
+      assert(log.every((e) => e.time >= e.at), 'nějaká nota přišla pozdě');
+      assert(log.length > 64, `zaznělo jen ${log.length} not`);
+      let maxErr = 0;
+      log.forEach((e, i) => {
+        const k = i % 32;
+        const pass = Math.floor(i / 32);
+        const expected = 0.05 + pass * 6 + (k < 16 ? k * 0.125 : 2 + (k - 16) * 0.25);
+        const expDur = k < 16 ? 0.0625 : 0.125; // 1/32 nota v 120 a v 60 BPM
+        assert(e.pitch === 40 + k, `nota #${i} má špatnou výšku`);
+        assert(Math.abs(e.dur - expDur) < 1e-9, `nota #${i} má délku ${e.dur} s místo ${expDur} s`);
+        maxErr = Math.max(maxErr, Math.abs(e.time - expected));
+      });
+      assert(maxErr < 1e-9, `nota mimo očekávaný čas o ${maxErr} s`);
+      detail = `${log.length} not, ${Math.floor(log.length / 32)}× smyčka 120 → 60 → 120 BPM, max chyba ${maxErr.toExponential(1)} s`;
+    });
+    return detail;
+  });
+
+  test('Export: tempo po úsecích – údery přesně v čase a správná délka', async () => {
+    const p = MB.createProject({ bpm: 120, bars: 2, loop: false });
+    const t = MB.createTrack('drums');
+    t.reverb = 0;
+    for (let beat = 0; beat < 8; beat++) t.notes.push(MB.createNote(MB.DRUM_INDEX.rim, beat * PPQ, PPQ / 4, 1));
+    p.tracks.push(t);
+    MB.setTempoChange(p, MB.barTicks(p), 240); // 1. takt 2 s, 2. takt 1 s
+    const sr = 44100;
+    const buf = await MB.renderProject(p, { sampleRate: sr, tail: 0.5 });
+    assert(Math.abs(buf.length / sr - (0.02 + 3 + 0.5)) < 0.001, `délka renderu ${(buf.length / sr).toFixed(3)} s`);
+    const d = buf.getChannelData(0);
+    const onsets = [];
+    let active = false;
+    let quiet = 0;
+    for (let i = 0; i < d.length; i++) {
+      const a = Math.abs(d[i]);
+      if (!active && a > 0.01) {
+        onsets.push(i / sr);
+        active = true;
+      }
+      quiet = a < 0.0005 ? quiet + 1 : 0;
+      if (quiet > 200) active = false; // úder dozněl
+    }
+    const expected = [0, 0.5, 1, 1.5, 2, 2.25, 2.5, 2.75].map((s) => 0.02 + s);
+    assert(onsets.length === expected.length, `čekal ${expected.length} úderů, našel ${onsets.length}`);
+    // kompresor a limiter na masteru mají pevné zpoždění (Chrome 2× 6 ms) – posouvá všechno stejně
+    const shift = onsets[0] - expected[0];
+    assert(shift >= 0 && shift < 0.02, `celkové zpoždění ${(shift * 1000).toFixed(1)} ms`);
+    const err = Math.max(...onsets.map((o, i) => Math.abs(o - shift - expected[i])));
+    assert(err < 0.002, `úder mimo čas o ${(err * 1000).toFixed(2)} ms`);
+    return `8 úderů (120 → 240 BPM), největší odchylka rozestupu ${(err * 1000).toFixed(2)} ms, délka ${(buf.length / sr).toFixed(2)} s`;
+  });
+
+  // ===========================================================================
   // Offline render – začíná nota opravdu v naplánovaném vzorku?
   // ===========================================================================
 
@@ -523,10 +612,13 @@
     const origSchedule = T._schedule;
     T._schedule = function () { wakeups++; return origSchedule.call(this); };
     const stall = setInterval(() => { const s = performance.now(); while (performance.now() - s < 40) { /* zátěž */ } }, 150);
+    let audioSec = 0;
     try {
       T.position = 0;
+      const c0 = ctx.currentTime;
       T.play();
       await sleep(4000);
+      audioSec = ctx.currentTime - c0; // po těžkých offline renderech běží hodiny zvuku chvíli pomaleji než reálný čas
     } finally {
       clearInterval(stall);
       T.stop();
@@ -538,11 +630,13 @@
     const late = log.filter((e) => e.time < e.at);
     const maxErr = Math.max(...intervals(log).map((d) => Math.abs(d - step)));
     const minLead = Math.min(...log.map((e) => e.time - e.at));
-    // 4 s při 150 BPM v šestnáctinách = 40 not (+ to, co je naplánované dopředu)
-    assert(log.length >= 38 && log.length <= 43, `čekal ~40 not, zaznělo ${log.length}`);
+    // 4 s při 150 BPM v šestnáctinách = 40 not (+ to, co je naplánované dopředu);
+    // scheduler jede podle hodin AudioContextu, takže počet not se počítá z nich
+    const expected = Math.round((audioSec - 0.05 + MB.LOOKAHEAD) / step);
+    assert(Math.abs(log.length - expected) <= 2, `čekal ~${expected} not (${audioSec.toFixed(2)} s zvuku), zaznělo ${log.length}`);
     assert(late.length === 0, `${late.length} not přišlo pozdě`);
     assert(maxErr < 1e-9, `nepravidelný rozestup ${maxErr}`);
-    return `${log.length} not, ${(wakeups / 4).toFixed(0)} probuzení/s, nejmenší předstih ${(minLead * 1000).toFixed(1)} ms, ` +
+    return `${log.length} not za ${audioSec.toFixed(2)} s zvuku, ${(wakeups / 4).toFixed(0)} probuzení/s, nejmenší předstih ${(minLead * 1000).toFixed(1)} ms, ` +
       `max chyba rozestupu ${maxErr.toExponential(1)} s, sample rate ${ctx.sampleRate} Hz`;
   });
 

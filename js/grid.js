@@ -14,7 +14,9 @@
 
   const MIN_PITCH = MB.PITCH_MIN; // C1
   const MAX_PITCH = MB.PITCH_MAX; // C7
-  const RULER_H = 30;
+  const TEMPO_H = 18;            // horní pruh pravítka se změnami tempa
+  const RULER_H = TEMPO_H + 30;  // + takty a smyčka
+  const TEMPO_FONT = "600 10px 'Inter', 'Segoe UI', system-ui, sans-serif";
   const CLIPBOARD_KEY = 'makerbeater.clipboard.v1';
   const KEYS_W = 64;
   const DRUM_KEYS_W = 116;
@@ -43,6 +45,7 @@
     afterEnd: 'rgba(0, 0, 0, 0.5)',
     playhead: '#22d3ee',
     accent: '#7c5cff',
+    tempo: '#fcc419',
   };
 
   // Kurzory jako malé SVG (tužka, guma)
@@ -117,6 +120,9 @@
     keysHover: -1,      // řádek pod myší na klaviatuře
     keysDown: null,     // { row, voice } – držená klávesa
     rulerDrag: null,
+    tempoDrag: null,    // tažení / klik v pruhu tempa
+    tempoHover: null,   // tick značky tempa pod myší
+    tempoEdit: null,    // { tick, input, finish } – otevřené pole pro tempo
     touches: new Map(), // aktivní prsty (pinch zoom)
     autoRAF: 0,
     lastLength: PPQ / 4,
@@ -800,15 +806,29 @@
     return xTick(localPoint(e, G.els.ruler).x);
   }
 
+  const inTempoLane = (e) => localPoint(e, G.els.ruler).y < TEMPO_H;
+
   function onRulerDown(e) {
     e.preventDefault();
+    if (G.tempoEdit) G.tempoEdit.finish(true);
+    if (inTempoLane(e)) {
+      onTempoDown(e);
+      return;
+    }
     capture(G.els.ruler, e);
     G.rulerDrag = { tick0: rulerTick(e), x0: e.clientX, moved: false };
   }
 
   function onRulerMove(e) {
+    if (G.tempoDrag) {
+      onTempoMove(e);
+      return;
+    }
     const rd = G.rulerDrag;
-    if (!rd) return;
+    if (!rd) {
+      updateTempoHover(e);
+      return;
+    }
     if (!rd.moved && Math.abs(e.clientX - rd.x0) < 5) return;
     if (!rd.moved) State.beginGesture();
     rd.moved = true;
@@ -827,6 +847,10 @@
   }
 
   function onRulerUp(e) {
+    if (G.tempoDrag) {
+      onTempoUp(e);
+      return;
+    }
     const rd = G.rulerDrag;
     G.rulerDrag = null;
     if (!rd) return;
@@ -836,6 +860,186 @@
     }
     const stepT = MB.stepTicks(State.project);
     MB.Transport.seek(Math.max(0, Math.floor(rulerTick(e) / stepT) * stepT));
+  }
+
+  // ---------------------------------------------------------------------------
+  // Pruh tempa (horní část pravítka) – změny tempa po úsecích
+  // klik = změna tempa od začátku taktu (nebo úprava existující) · tah = posun ·
+  // pravé tlačítko = smazat · Alt = přesnost na doby
+  // ---------------------------------------------------------------------------
+
+  const tempoLabel = (bpm) => `♩ ${bpm}`;
+
+  /** Značky tempa: začátek skladby (index -1) a změny tempa. */
+  function tempoMarks(p) {
+    return [{ tick: 0, bpm: p.bpm, index: -1 }]
+      .concat((p.tempoChanges || []).map((c, index) => ({ tick: c.tick, bpm: c.bpm, index })));
+  }
+
+  /** Značka pod bodem x pravítka – počítá se i její popisek. Při překryvu vyhrává pozdější. */
+  function tempoMarkAt(p, x) {
+    const c = G.rctx;
+    c.font = TEMPO_FONT;
+    let hit = null;
+    for (const m of tempoMarks(p)) {
+      if (m.tick >= MB.songTicks(p)) continue;
+      const mx = tickX(m.tick);
+      if (x >= mx - 6 && x <= mx + c.measureText(tempoLabel(m.bpm)).width + 10) hit = m;
+    }
+    return hit;
+  }
+
+  function updateTempoHover(e) {
+    const lane = inTempoLane(e);
+    const mark = lane ? tempoMarkAt(State.project, localPoint(e, G.els.ruler).x) : null;
+    const tick = mark ? mark.tick : null;
+    G.els.ruler.style.cursor = lane && mark && mark.index >= 0 ? 'ew-resize' : 'pointer';
+    if (tick !== G.tempoHover) {
+      G.tempoHover = tick;
+      G.dirty = true;
+    }
+  }
+
+  function onTempoDown(e) {
+    const p = State.project;
+    const mark = tempoMarkAt(p, localPoint(e, G.els.ruler).x);
+    if (e.button === 2) { // pravé tlačítko = smazat změnu tempa (začátek skladby smazat nejde)
+      if (mark && mark.index >= 0) State.change((pp) => { pp.tempoChanges.splice(mark.index, 1); }, 'project');
+      return;
+    }
+    capture(G.els.ruler, e);
+    const change = mark && mark.index >= 0 ? p.tempoChanges[mark.index] : null;
+    G.tempoDrag = { mark, change, x0: e.clientX, moved: false };
+  }
+
+  function onTempoMove(e) {
+    const td = G.tempoDrag;
+    if (!td.change) return; // začátek skladby ani prázdné místo se netáhne
+    if (!td.moved && Math.abs(e.clientX - td.x0) < 5) return;
+    if (!td.moved) State.beginGesture();
+    td.moved = true;
+    const p = State.project;
+    const snap = e.altKey ? PPQ : MB.barTicks(p);
+    const tick = clamp(Math.round(rulerTick(e) / snap) * snap, snap, Math.max(snap, MB.songTicks(p) - snap));
+    // na místo jiné změny tempa značku nepustíme
+    if (tick !== td.change.tick && !p.tempoChanges.some((c) => c !== td.change && c.tick === tick)) {
+      td.change.tick = tick;
+      p.tempoChanges.sort((a, b) => a.tick - b.tick);
+      G.tempoHover = tick;
+      State.changed('project');
+    }
+  }
+
+  function onTempoUp(e) {
+    const td = G.tempoDrag;
+    G.tempoDrag = null;
+    if (td.moved) {
+      State.endGesture('project');
+      return;
+    }
+    if (td.mark) {
+      openTempoEditor(td.mark.tick);
+      return;
+    }
+    // klik do prázdna = nová změna tempa od začátku taktu, do kterého se kliklo
+    const p = State.project;
+    const snap = e.altKey ? PPQ : MB.barTicks(p);
+    openTempoEditor(clamp(Math.floor(rulerTick(e) / snap) * snap, 0, MB.songTicks(p) - 1));
+  }
+
+  /**
+   * Malé pole pro tempo přímo v pravítku. Enter / klik jinam = uložit, Esc = zrušit,
+   * prázdné pole = smazat změnu tempa (hodí se na dotyk, kde není pravé tlačítko).
+   */
+  function openTempoEditor(tick) {
+    if (G.tempoEdit) G.tempoEdit.finish(true);
+    const p = State.project;
+    const input = document.createElement('input');
+    input.type = 'number';
+    input.min = MB.BPM_MIN;
+    input.max = MB.BPM_MAX;
+    input.step = 1;
+    input.className = 'tempo-edit';
+    input.value = MB.bpmAt(p, tick);
+    input.title = 'Tempo od tohoto místa · Enter = uložit · Esc = zrušit · prázdné = smazat změnu';
+    const r = G.els.ruler.getBoundingClientRect();
+    input.style.left = `${Math.round(r.left + clamp(tickX(tick), 0, Math.max(0, G.viewW - 72)))}px`;
+    input.style.top = `${Math.round(r.top)}px`;
+    let done = false;
+    // klik kamkoliv jinam pole uloží a zavře (mřížka si fokus nebere, takže blur nepřijde)
+    const outside = (e) => { if (e.target !== input) finish(true); };
+    const finish = (save) => {
+      if (done) return;
+      done = true;
+      document.removeEventListener('pointerdown', outside, true);
+      input.remove();
+      G.tempoEdit = null;
+      G.dirty = true;
+      if (!save) return;
+      const raw = input.value.trim();
+      if (raw === '') { // smazat změnu tempa
+        State.change((pp) => {
+          if (pp.tempoChanges) pp.tempoChanges = pp.tempoChanges.filter((c) => c.tick !== tick);
+        }, 'project');
+        return;
+      }
+      if (!Number.isFinite(+raw)) return;
+      const bpm = clamp(Math.round(+raw), MB.BPM_MIN, MB.BPM_MAX);
+      State.change((pp) => MB.setTempoChange(pp, tick, bpm), 'project');
+    };
+    input.addEventListener('keydown', (e) => {
+      e.stopPropagation(); // mezerník, Delete… teď nejsou zkratky aplikace
+      if (e.key === 'Enter') finish(true);
+      else if (e.key === 'Escape') finish(false);
+    });
+    input.addEventListener('blur', () => finish(true));
+    document.addEventListener('pointerdown', outside, true);
+    document.body.appendChild(input);
+    G.tempoEdit = { tick, input, finish };
+    G.dirty = true;
+    input.focus();
+    input.select();
+  }
+
+  function renderTempoLane(p, c, W) {
+    const songEnd = MB.songTicks(p);
+    c.fillStyle = '#0e1219';
+    c.fillRect(0, 0, W, TEMPO_H);
+    c.font = TEMPO_FONT;
+    c.textBaseline = 'middle';
+    const marks = tempoMarks(p).filter((m) => m.tick < songEnd);
+    if (G.tempoEdit && !marks.some((m) => m.tick === G.tempoEdit.tick)) { // nová změna, která se právě zadává
+      marks.push({ tick: G.tempoEdit.tick, bpm: null, index: null });
+      marks.sort((a, b) => a.tick - b.tick);
+    }
+    const y = TEMPO_H / 2 + 1;
+    for (let i = 0; i < marks.length; i++) {
+      const m = marks[i];
+      const x = tickX(m.tick);
+      const nextX = tickX(i + 1 < marks.length ? marks[i + 1].tick : songEnd);
+      if (nextX < 0 || x > W) continue;
+      // úseky se střídají v odstínu, ať je vidět, kde které tempo platí
+      if (marks.length > 1) {
+        c.fillStyle = i % 2 ? 'rgba(252, 196, 25, 0.08)' : 'rgba(252, 196, 25, 0.025)';
+        c.fillRect(x, 0, nextX - x, TEMPO_H);
+      }
+      const hover = G.tempoHover === m.tick;
+      c.fillStyle = m.index === -1 ? 'rgba(252, 196, 25, 0.45)' : COL.tempo;
+      c.fillRect(Math.round(x), 0, hover ? 3 : 2, TEMPO_H);
+      if (m.bpm == null) continue; // popisek zakrývá pole pro zadání
+      const label = tempoLabel(m.bpm);
+      const w = c.measureText(label).width;
+      if (nextX - x > w + 10 || i === marks.length - 1) {
+        const lx = Math.max(x + 5, 4);
+        c.fillStyle = hover ? '#fff3bf' : m.index === -1 ? '#c9cfdc' : '#ffe066';
+        c.fillText(label, lx, y);
+        if (marks.length === 1) { // nápověda, dokud žádná změna tempa není
+          c.fillStyle = 'rgba(201, 207, 220, 0.32)';
+          c.fillText('klikni sem = změna tempa od taktu', lx + w + 14, y);
+        }
+      }
+    }
+    hline(c, TEMPO_H, W, '#1f2533');
   }
 
   function resetLoop() {
@@ -1204,15 +1408,17 @@
 
     const songEnd = MB.songTicks(p);
     const barT = MB.barTicks(p);
+    const T = TEMPO_H; // pod pruhem tempa: takty a smyčka
+    renderTempoLane(p, c, W);
 
     // oblast smyčky
     const [ls, le] = MB.loopRange(p);
     const lx1 = tickX(ls);
     const lx2 = tickX(le);
     c.fillStyle = p.loop ? 'rgba(124, 92, 255, 0.14)' : 'rgba(139, 147, 167, 0.06)';
-    c.fillRect(lx1, 0, lx2 - lx1, H);
+    c.fillRect(lx1, T, lx2 - lx1, H - T);
     c.fillStyle = p.loop ? COL.accent : '#4a5164';
-    c.fillRect(lx1, 0, lx2 - lx1, 4);
+    c.fillRect(lx1, T, lx2 - lx1, 4);
 
     // takty a doby
     const barPx = (barT * G.beatW) / PPQ;
@@ -1227,7 +1433,7 @@
       vline(c, x, H, 'rgba(255, 255, 255, 0.25)');
       if (b % labelEvery === 0 && b * barT < songEnd) {
         c.fillStyle = '#c9cfdc';
-        c.fillText(String(b + 1), x + 5, 17);
+        c.fillText(String(b + 1), x + 5, T + 17);
       }
       if (G.beatW >= 10) {
         for (let k = 1; k < p.beatsPerBar; k++) {
@@ -1549,7 +1755,10 @@
     s.addEventListener('dblclick', onDblClick);
     s.addEventListener('wheel', onWheel, { passive: false });
     s.addEventListener('contextmenu', (e) => e.preventDefault());
-    s.addEventListener('scroll', () => { G.dirty = true; });
+    s.addEventListener('scroll', () => {
+      G.dirty = true;
+      if (G.tempoEdit) G.tempoEdit.finish(true); // pole by jinak „ujelo“ od své značky
+    });
 
     const k = els.keys;
     k.addEventListener('pointerdown', onKeysDown);
@@ -1568,8 +1777,18 @@
     r.addEventListener('pointerdown', onRulerDown);
     r.addEventListener('pointermove', onRulerMove);
     r.addEventListener('pointerup', onRulerUp);
-    r.addEventListener('pointercancel', () => { G.rulerDrag = null; });
-    r.addEventListener('dblclick', resetLoop);
+    r.addEventListener('pointercancel', () => {
+      G.rulerDrag = null;
+      G.tempoDrag = null;
+    });
+    r.addEventListener('pointerleave', () => {
+      if (G.tempoHover != null) {
+        G.tempoHover = null;
+        G.dirty = true;
+      }
+    });
+    r.addEventListener('dblclick', (e) => { if (!inTempoLane(e)) resetLoop(); });
+    r.addEventListener('contextmenu', (e) => e.preventDefault());
     r.addEventListener('wheel', (e) => {
       if (e.ctrlKey || e.metaKey) return onWheel(e);
       e.preventDefault();

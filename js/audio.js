@@ -1600,14 +1600,14 @@
       if (p.loop && tick >= loopEnd) tick = loopStart;
       if (!p.loop && tick >= songEnd) tick = 0;
 
-      const spt = MB.secPerTick(p);
+      const spt = MB.secPerTick(p, tick);
       const t0 = ctx.currentTime + 0.05; // malá rezerva, ať první nota nepřijde pozdě
       this.playing = true;
       this.playStartTick = tick;
       this.nextTick = tick;
       this.endTime = Infinity;
       this.anchors = [{ time: t0, tick, spt }];
-      this._chaseNotes(p, tick, t0, spt);
+      this._chaseNotes(p, tick, t0);
       if (!this.ticker) this.ticker = createTicker(() => this._schedule());
       this.ticker.start();
       this._schedule();
@@ -1693,8 +1693,8 @@
         const nextTime = a.time + (this.nextTick - a.tick) * a.spt;
         if (nextTime >= horizon) break;
 
-        const spt = MB.secPerTick(p);
-        if (spt !== a.spt) { // změna tempa za běhu – nová kotva
+        const spt = MB.secPerTick(p, this.nextTick);
+        if (spt !== a.spt) { // začátek úseku s jiným tempem nebo změna tempa za běhu – nová kotva
           a = { time: nextTime, tick: this.nextTick, spt };
           this.anchors.push(a);
         }
@@ -1707,12 +1707,14 @@
             break;
           }
           this.nextTick = loopStart; // skok na začátek smyčky
-          this.anchors.push({ time: nextTime, tick: loopStart, spt });
+          this.anchors.push({ time: nextTime, tick: loopStart, spt: MB.secPerTick(p, loopStart) });
           this.endTime = Infinity;
           continue;
         }
 
-        const toTick = Math.min(regionEnd, this.nextTick + (horizon - nextTime) / spt);
+        // úsek plánujeme jen po nejbližší změnu tempa – za ní se počítá s novým tempem
+        const tempoEnd = MB.nextTempoChange(p, this.nextTick);
+        const toTick = Math.min(regionEnd, tempoEnd, this.nextTick + (horizon - nextTime) / spt);
         this._scheduleRange(p, this.nextTick, toTick, a, regionEnd);
         this.nextTick = toTick;
       }
@@ -1736,17 +1738,19 @@
       for (const [track, n] of events) {
         const time = anchor.time + (n.start - anchor.tick) * anchor.spt;
         const len = Math.min(n.length, regionEnd - n.start); // na konci smyčky notu ořízneme
-        Engine.playNote(track, n.pitch, time, len * anchor.spt, n.velocity, n.tune || 0);
+        const dur = MB.tickToSec(p, n.start + len) - MB.tickToSec(p, n.start); // i přes změnu tempa
+        Engine.playNote(track, n.pitch, time, dur, n.velocity, n.tune || 0);
       }
     },
 
     /** Při startu uprostřed dlouhé noty (např. pad) ji dohrajeme od aktuální pozice. */
-    _chaseNotes(p, tick, time, spt) {
+    _chaseNotes(p, tick, time) {
       for (const track of p.tracks) {
         if (getInstrument(track.instrument).kind !== 'melodic') continue;
         for (const n of track.notes) {
           if (n.start < tick && n.start + n.length > tick + 1) {
-            Engine.playNote(track, n.pitch, time, (n.start + n.length - tick) * spt, n.velocity, n.tune || 0);
+            const dur = MB.tickToSec(p, n.start + n.length) - MB.tickToSec(p, tick);
+            Engine.playNote(track, n.pitch, time, dur, n.velocity, n.tune || 0);
           }
         }
       }
@@ -1767,10 +1771,10 @@
    */
   async function renderProject(project, { sampleRate = 44100, tail = 3, onProgress, chunk = 0.25 } = {}) {
     await Promise.all([prepareDrumKit(sampleRate), preparePiano()]);
-    const spt = MB.secPerTick(project);
     const songEnd = MB.songTicks(project);
     const t0 = 0.02;
-    const seconds = t0 + songEnd * spt + tail;
+    const at = (tick) => t0 + MB.tickToSec(project, tick); // čas podle mapy temp
+    const seconds = at(songEnd) + tail;
     const OAC = window.OfflineAudioContext || window.webkitOfflineAudioContext;
     const ctx = new OAC(2, Math.ceil(seconds * sampleRate), sampleRate);
     const master = buildMaster(ctx);
@@ -1787,7 +1791,7 @@
       for (const n of track.notes) {
         if (n.start >= songEnd) continue;
         const len = Math.min(n.length, songEnd - n.start);
-        events.push({ time: t0 + n.start * spt, dur: len * spt, n, inst, strip, track });
+        events.push({ time: at(n.start), dur: at(n.start + len) - at(n.start), n, inst, strip, track });
       }
     }
     events.sort((a, b) => a.time - b.time);

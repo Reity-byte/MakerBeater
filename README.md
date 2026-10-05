@@ -53,6 +53,8 @@ Funguje v aktuálním Chrome, Edge, Firefoxu i Safari. Nejlíp v Chrome/Edge (ne
 - **Efekty u stopy:** dozvuk, **sidechain** („pumpování“ do kopáku jako v house) a **zkreslení**.
 - **Šablony:** *House starter pack* (125 BPM, 909, sidechain) a *Breakcore* (172 BPM, rozsekaný amen rytmus).
 - **Přehrávání:** Play/Pauza/Stop, smyčka (oblast se nastaví tažením v pravítku), sledování kurzoru, změna tempa za běhu.
+- **Tempo po úsecích:** v horním pruhu pravítka klik přidá změnu tempa od taktu, tah ji posune (Alt = po dobách),
+  pravé tlačítko nebo prázdné pole ji smaže. Pole **BPM** ukazuje a mění tempo úseku, ve kterém je kurzor.
 - **Hudební pomocníci:** stupnice (dur, moll, harmonická moll, pentatoniky, blues, dórská, chromatická),
   přichytávání ke stupnici, kvantizace (Q), takt 2/4 až 7/4, mřížka 1/4 až 1/64 včetně triol,
   rozsekání not na rychlé rolly (R).
@@ -121,6 +123,7 @@ Projekt je obyčejný JSON (tak se i exportuje):
   "scale": { "root": 9, "type": "minor" },
   "snapToScale": true,
   "loop": true, "loopStart": 0, "loopEnd": null,
+  "tempoChanges": [ { "tick": 3072, "bpm": 140 } ],
   "tracks": [
     {
       "id": "k3f9a1x2", "name": "Bas", "instrument": "bass", "color": "#4dabf7",
@@ -135,6 +138,9 @@ Projekt je obyčejný JSON (tak se i exportuje):
   mřížce a jsou to vždy celá čísla.
 - **`pitch`** je MIDI číslo (60 = C4). U bicí stopy je to číslo řádku (0 = kick, 1 = snare… viz `DRUM_ROWS`).
 - **`loopEnd: null`** = smyčka až do konce skladby.
+- **Tempo:** `bpm` platí od začátku, `tempoChanges` mění tempo od daného ticku dál (seřazené). Převod pozice
+  na sekundy dělá `MB.tickToSec(p, tick)` po úsecích. Scheduler plánuje vždy jen po nejbližší změnu tempa
+  a na hranici si založí novou kotvu, takže noty sedí přesně i při smyčce přes víc úseků.
 - Při načtení (localStorage i import) projde projekt kontrolou `normalizeProject()`. Čísla se oříznou na rozumný
   rozsah, neznámý nástroj se nahradí klavírem a vadné noty se zahodí.
 
@@ -192,7 +198,7 @@ Další piana nad nimi stačí postavit přes `playPiano(v, ctx, pitch, time, du
 Otevři `tests/test.html` a klikni na **Spustit všechny testy** (živý audio test je potichu, pokud nezaškrtneš „nahlas“).
 Testy ověří:
 
-- přesnost scheduleru (simulované zasekávání UI, změna tempa, smyčka, konec skladby),
+- přesnost scheduleru (simulované zasekávání UI, změna tempa, tempo po úsecích, smyčka, konec skladby),
 - nástup noty přesně na vzorek,
 - stupnice, undo/redo a kontrolu importu,
 - export a import JSON beze ztráty,
